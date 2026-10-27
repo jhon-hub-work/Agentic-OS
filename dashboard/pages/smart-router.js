@@ -20,6 +20,7 @@ async function renderSmartRouter() {
           <label class="form-label">Route to Agent</label>
           <select class="form-select" id="routerAgentSelect">
             <option value="auto">🤖 Auto (AI suggests)</option>
+            <option value="claude">🎯 Claude Code (Hard work)</option>
             <option value="opencode">🔧 opencode (Code/DevOps)</option>
             <option value="hermes">⚡ Hermes (Memory/Scheduling)</option>
             <option value="agy">🧠 agy (Research/Analysis)</option>

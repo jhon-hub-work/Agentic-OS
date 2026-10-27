@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Agentic OS</title>
+<style>body{margin:0;min-height:100dvh;display:grid;place-items:center;background:#E6EEF4;color:#1D2B3A;font-family:system-ui,sans-serif}
+main{text-align:center;max-width:42ch;padding:24px}code{background:#fff;padding:2px 6px;border-radius:6px}a{color:#1F2D44}</style></head>
+<body><main><h1 style="font-weight:500">Agentic OS isn't running</h1>
+<p>Start it with <code>pwsh -File start.ps1</code> in the agentic-os folder, then <a href="http://127.0.0.1:8810">reload</a>.</p></main>
+<script>const go = () => fetch('http://127.0.0.1:8810/api/status', { mode: 'no-cors' }).then(() => { location.href = 'http://127.0.0.1:8810' }).catch(() => {}); go(); setInterval(go, 3000)</script>
+</body></html>

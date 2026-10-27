@@ -100,7 +100,7 @@ class SecurityTests(unittest.TestCase):
     def test_scheduler_job_valid_name_works(self):
         status, data = self.h.api(
             "POST", "/api/scheduler/jobs",
-            {"name": "test-job-v4", "skill": "heartbeat", "cron": "0 0 * * *"},
+            {"name": "test-job-v4", "kind": "skill", "skill": "heartbeat", "cron": "0 0 * * *"},
         )
         self.assertEqual(status, 200)
         self.assertEqual(data.get("name"), "test-job-v4")

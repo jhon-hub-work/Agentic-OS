@@ -3,7 +3,7 @@
   "name": "Daily Standup",
   "skill": "daily-standup",
   "cron": "0 9 * * 1-5",
-  "enabled": true,
+  "enabled": false,
   "created": "2026-05-17T00:00:00Z",
   "last_run": null,
   "next_run": null

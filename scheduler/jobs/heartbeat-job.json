@@ -5,7 +5,7 @@
   "cron": "*/5 * * * *",
   "enabled": true,
   "created": "2026-05-17T00:00:00Z",
-  "last_run": null,
+  "last_run": "2026-10-27T07:41:17.190549+00:00",
   "next_run": null,
   "description": "System health check every 5 minutes"
 }

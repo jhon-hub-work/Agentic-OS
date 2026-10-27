@@ -21,6 +21,13 @@ async function renderChat() {
             <div class="chat-agent-desc">Code & DevOps</div>
           </div>
         </div>
+        <div class="chat-agent" data-agent="claude" onclick="selectAgent('claude')">
+          <div class="agent-dot online"></div>
+          <div>
+            <div class="chat-agent-name">Claude Code</div>
+            <div class="chat-agent-desc">Hard work (subscription)</div>
+          </div>
+        </div>
         <div class="chat-agent" data-agent="hermes" onclick="selectAgent('hermes')">
           <div class="agent-dot online"></div>
           <div>

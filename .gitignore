@@ -20,3 +20,15 @@ data/memory.db
 data/kanban/*.json
 data/uploads/
 scheduler/*.pyc
+data/auth-token
+.claude/
+data/team/
+data/sessions/
+data/jobs/
+data/server.log
+data/jharvis/
+jobs/private_terms.txt
+PLAN.md
+web/node_modules/
+web/dist/
+config/owner.json

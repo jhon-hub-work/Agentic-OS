@@ -10,6 +10,9 @@ import re
 import shutil
 import subprocess
 import tarfile
+import threading
+
+import owner
 import time
 import uuid
 from datetime import datetime, timezone
@@ -33,6 +36,9 @@ async def lifespan(app: FastAPI):
         from scheduler.scheduler import CronScheduler
         _scheduler_instance = CronScheduler()
         _scheduler_instance.start()
+        from scheduler.scheduler import on_event
+        on_event(handle_scheduler_event)
+        mark_interrupted_runs()
         print("Event-driven scheduler started")
     except Exception as e:
         print(f"Scheduler not available: {e}")
@@ -46,7 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Agentic OS", version="4.0", lifespan=lifespan)
 
 # Load OpenRouter API key from Hermes .env
-HERMES_ENV = Path.home() / ".hermes" / ".env"
+HERMES_ENV = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / ".env"
 if HERMES_ENV.exists():
     for line in HERMES_ENV.read_text().splitlines():
         line = line.strip()
@@ -58,7 +64,7 @@ if HERMES_ENV.exists():
 # CORS for local dev
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8080", "http://localhost:8080"],
+    allow_origins=["http://127.0.0.1:8810", "http://localhost:8810"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -80,6 +86,36 @@ class NoCacheMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(NoCacheMiddleware)
 
+# Phone/remote access needs a token; the PC itself (loopback) does not.
+# Open http://<pc>:8810/?token=<data/auth-token> once on the phone to set the cookie.
+AUTH_TOKEN_FILE = Path(__file__).parent / "data" / "auth-token"
+if not AUTH_TOKEN_FILE.exists():
+    import secrets
+    AUTH_TOKEN_FILE.parent.mkdir(exist_ok=True)
+    AUTH_TOKEN_FILE.write_text(secrets.token_urlsafe(32))
+AUTH_TOKEN = AUTH_TOKEN_FILE.read_text().strip()
+
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        if request.client and request.client.host in ("127.0.0.1", "::1"):
+            return await call_next(request)
+        given = (request.query_params.get("token")
+                 or request.cookies.get("aos_token")
+                 or request.headers.get("authorization", "").removeprefix("Bearer "))
+        if not secrets_compare(given, AUTH_TOKEN):
+            return Response("Unauthorized", status_code=401)
+        response = await call_next(request)
+        if request.query_params.get("token"):
+            response.set_cookie("aos_token", AUTH_TOKEN, httponly=True, samesite="strict",
+                                max_age=60 * 60 * 24 * 365)
+        return response
+
+def secrets_compare(a: str, b: str) -> bool:
+    import hmac
+    return bool(a) and hmac.compare_digest(a.encode(), b.encode())
+
+app.add_middleware(TokenAuthMiddleware)
+
 BASE_DIR = Path(__file__).parent.resolve()
 
 # ─── Models ───────────────────────────────────────────────────────
@@ -93,8 +129,11 @@ class SkillRunRequest(BaseModel):
 
 class ScheduleJobRequest(BaseModel):
     name: str
-    skill: str
     cron: str
+    kind: str = "agent"          # agent | team | skill
+    agent: str = "claude"
+    prompt: str = ""
+    skill: Optional[str] = None
     enabled: bool = True
 
 class SettingsUpdate(BaseModel):
@@ -197,29 +236,18 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # ─── Agent Discovery (instant filesystem checks) ────────────────────
 
+AGENTS = ["claude", "opencode", "hermes", "agy"]
+
 def check_agent(name: str) -> dict:
     """Instant filesystem-based check. No subprocess needed."""
-    try:
-        if name == "opencode":
-            exists = shutil.which("opencode") is not None
-            status = "online" if exists else "offline"
-        elif name == "hermes":
-            exists = shutil.which("hermes") is not None
-            status = "online" if exists else "offline"
-        elif name == "agy":
-            exists = shutil.which("agy") is not None
-            status = "online" if exists else "offline"
-        else:
-            status = "offline"
-    except Exception:
-        status = "offline"
+    status = "online" if name in AGENTS and shutil.which(name) else "offline"
     return {"name": name, "status": status}
 
 # ─── Routes: Status ───────────────────────────────────────────────
 
 @app.get("/api/status")
 def get_status():
-    agents = [check_agent(a) for a in ["opencode", "hermes", "agy"]]
+    agents = [check_agent(a) for a in AGENTS]
     skills_dir = BASE_DIR / "skills"
     skills = [d.name for d in skills_dir.iterdir()
               if d.is_dir() and not d.name.startswith("_")] if skills_dir.exists() else []
@@ -331,7 +359,7 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
                 line = line.strip()
                 if "Primary:" in line:
                     candidate = line.split(":")[-1].strip().lower()
-                    if candidate in ("opencode", "hermes", "agy"):
+                    if candidate in AGENTS:
                         agent_choice = candidate
                         break
             if agent_choice == "auto":
@@ -342,7 +370,7 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
     if skill_md:
         prompt += f"## Skill Instructions\n{skill_md}\n\n"
     if learnings and learnings.strip():
-        prompt += f"## Past Learnings\n{learnings}\n\n"
+        prompt += f"## Past Learnings\n{learnings[-6000:]}\n\n"  # newest only: the prompt is a CLI argument (Windows caps it at 32K)
     if skill_input:
         prompt += f"## User Input\n{skill_input}"
 
@@ -410,9 +438,23 @@ def create_job(job: ScheduleJobRequest):
     jobs_dir = BASE_DIR / "scheduler" / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
     validate_identifier(job.name, r"^[a-zA-Z0-9 _-]+$", "job name")
+    if job.kind not in ("agent", "team", "skill", "jobs"):
+        raise HTTPException(400, "kind must be agent, team, skill or jobs")
+    if job.kind in ("agent", "team") and (job.agent not in AGENTS or not job.prompt.strip()):
+        raise HTTPException(400, "An agent and a prompt are required")
+    if job.kind == "skill" and not job.skill:
+        raise HTTPException(400, "Pick a skill")
+    try:
+        from apscheduler.triggers.cron import CronTrigger
+        CronTrigger.from_crontab(job.cron)
+    except Exception:
+        raise HTTPException(400, "Cron must look like '0 9 * * 1-5' (min hour day month weekday)")
     job_data = {
         "id": str(uuid.uuid4())[:8],
         "name": job.name,
+        "kind": job.kind,
+        "agent": job.agent,
+        "prompt": job.prompt,
         "skill": job.skill,
         "cron": job.cron,
         "enabled": job.enabled,
@@ -437,6 +479,232 @@ def delete_job(job_id: str):
             return {"status": "deleted"}
     raise HTTPException(404, "Job not found")
 
+@app.patch("/api/scheduler/jobs/{job_id}")
+def toggle_job(job_id: str, data: dict):
+    for f in (BASE_DIR / "scheduler" / "jobs").glob("*.json"):
+        job = json.loads(f.read_text())
+        if job.get("id") == job_id:
+            job["enabled"] = bool(data.get("enabled", not job.get("enabled", True)))
+            f.write_text(json.dumps(job, indent=2))
+            append_audit({"action": "job_toggled", "job_id": job_id, "enabled": job["enabled"]})
+            return job
+    raise HTTPException(404, "Job not found")
+
+def mark_interrupted_runs():
+    """Team runs and sessions live in threads; a restart kills them, so don't leave them 'running' forever."""
+    for folder, field in ((BASE_DIR / "data" / "team", "active"), (BASE_DIR / "data" / "sessions", "working")):
+        for f in folder.glob("*.json") if folder.exists() else []:
+            run = json.loads(f.read_text())
+            if run.get("status") == "running":
+                run["status"] = "done" if field == "active" else "idle"
+                run[field] = None if field == "active" else []
+                run["interrupted"] = True
+                f.write_text(json.dumps(run, indent=2))
+
+def handle_scheduler_event(event: dict):
+    if event.get("type") == "job_run":
+        threading.Thread(target=run_scheduled, args=(event["job"], event.get("trigger", "cron")), daemon=True).start()
+
+def run_scheduled(job: dict, trigger: str):
+    from scheduler.scheduler import emit_event
+    kind = job.get("kind", "skill")
+    try:
+        if kind == "jobs":
+            out = json.dumps(run_job_pipeline())
+        elif kind == "agent":
+            out = execute_agent(job["agent"], job["prompt"])
+        elif kind == "team":
+            out = f"Team run {start_team(TeamRequest(message=job['prompt'], agent=job.get('agent', 'claude')))['id']} started"
+        else:
+            out = run_skill(job["skill"], SkillRunRequest(input=job.get("prompt", ""), agent=job.get("agent", "auto")))["output"]
+    except Exception as e:
+        out = f"Failed: {e}"
+    emit_event({"type": "job_done", "job_id": job.get("id"), "name": job.get("name"), "trigger": trigger, "output": out[:2000]})
+    append_audit({"action": "job_run", "job": job.get("name"), "agent": job.get("agent"), "output_preview": out[:100]})
+    for f in (BASE_DIR / "scheduler" / "jobs").glob("*.json"):
+        data = json.loads(f.read_text())
+        if data.get("id") == job.get("id"):
+            data["last_run"] = get_timestamp()
+            f.write_text(json.dumps(data, indent=2))
+
+# ─── Routes: Job pipeline (find, filter, score, draft; the owner approves) ─
+
+_jobs_lock = threading.Lock()
+
+def run_job_pipeline() -> dict:
+    from jobs import pipeline
+    if not _jobs_lock.acquire(blocking=False):
+        return {"skipped": "a job run is already going"}
+    try:
+        stats = pipeline.run(execute_agent, log=lambda m: print(f"[jobs] {m}"),
+                             after=auto_apply_clean if owner.OWNER.get("auto_apply") else None)
+        append_audit({"action": "jobs_run", "output_preview": f"{stats['drafted']} drafted, {stats['auto_sent']} sent, {stats['needs_you']} need {owner.NAME}"})
+        return stats
+    finally:
+        _jobs_lock.release()
+
+@app.post("/api/jobs/run")
+def jobs_run():
+    threading.Thread(target=run_job_pipeline, daemon=True).start()
+    return {"status": "started"}
+
+@app.get("/api/jobs")
+def jobs_board():
+    from jobs import pipeline
+    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+    board["running"] = _jobs_lock.locked()
+    return board
+
+@app.post("/api/jobs/{jid}/decision")
+def jobs_decision(jid: str, data: dict):
+    from jobs import pipeline
+    validate_identifier(jid, r"^[a-f0-9]{10}$", "job id")
+    try:
+        job = pipeline.decide(jid, str(data.get("decision", "")))
+    except KeyError:
+        raise HTTPException(404, "Job not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    append_audit({"action": "job_decision", "job": job["title"], "decision": job["status"]})
+    if job["status"] == "approved":  # the owner's Approve is the go-ahead: submit it the way Hoot does
+        threading.Thread(target=apply_approved, args=(jid,), daemon=True).start()
+    return job
+
+HOOT_PYTHON = os.environ.get("HOOT_PYTHON", owner.OWNER.get("system_python") or "python")
+
+def apply_approved(jid: str):
+    """Run jobs/apply_runner.py (system Python has Playwright) and record the outcome on the board."""
+    import tempfile
+    from jobs import pipeline
+    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+    job = next((j for j in board["jobs"] if j["id"] == jid), None)
+    if not job:
+        return
+    pipeline.set_fields(jid, status="applying")
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
+        json.dump(job, f)
+    try:
+        r = subprocess.run([HOOT_PYTHON, str(BASE_DIR / "jobs" / "apply_runner.py"), f.name], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=1200,
+                           env={k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")})
+        res = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except Exception as e:  # noqa: BLE001
+        res = {"outcome": "handoff", "reason": f"apply step crashed: {type(e).__name__}"}
+    finally:
+        os.unlink(f.name)
+    status = {"submitted": "applied", "closed": "closed"}.get(res.get("outcome"), "handoff")
+    pipeline.set_fields(jid, status=status, apply_result=res.get("reason") or res.get("outcome"), applied_at=pipeline.now())
+    append_audit({"action": "job_apply", "job": job["title"], "output_preview": f"{status}: {res.get('reason', '')}"[:100]})
+    return status
+
+def auto_apply_clean() -> int:
+    """owner.json auto_apply: drafts answerable from the CV, answers and profile go out without a tap, one at a
+    time (one Brave). Voice/video recordings, test tasks and calls move to needs_you for the owner."""
+    from jobs import pipeline
+    sent = 0
+    for j in pipeline.load(pipeline.BOARD, {"jobs": []})["jobs"]:
+        if j["status"] != "drafted" and "signed out" not in str(j.get("apply_result") or ""):
+            continue  # an OnlineJobs send that failed only because Brave was signed out is retried
+        why = pipeline.needs_owner(j)
+        if why:
+            pipeline.set_fields(j["id"], status="needs_you", needs_you=True, needs_why=why)
+            continue
+        pipeline.decide(j["id"], "approve")
+        sent += apply_approved(j["id"]) == "applied"
+    return sent
+
+_jharvis_seen = {"at": 0.0}
+JHARVIS_MSGS = BASE_DIR / "data" / "jharvis" / "messages.json"
+_msgs_lock = threading.Lock()
+
+class JharvisMessage(BaseModel):
+    text: str
+    role: str = "owner"   # "owner" from the dashboard, "jharvis" from Jharvis (its Slack posts are mirrored here)
+
+@app.get("/api/jharvis/messages")
+def jharvis_messages(limit: int = Query(60, le=300)):
+    msgs = json.loads(JHARVIS_MSGS.read_text()) if JHARVIS_MSGS.exists() else []
+    return {"messages": msgs[-limit:]}
+
+@app.post("/api/jharvis/messages")
+def jharvis_post(msg: JharvisMessage):
+    """The dashboard backup channel: the owner talks to Jharvis here too, in case Slack fails."""
+    if msg.role not in ("owner", "jharvis") or not msg.text.strip() or len(msg.text) > 8000:
+        raise HTTPException(400, "role must be owner or jharvis, text 1-8000 characters")
+    with _msgs_lock:
+        msgs = json.loads(JHARVIS_MSGS.read_text()) if JHARVIS_MSGS.exists() else []
+        item = {"id": str(uuid.uuid4())[:8], "role": msg.role, "text": msg.text.strip(), "timestamp": get_timestamp()}
+        msgs = (msgs + [item])[-500:]
+        JHARVIS_MSGS.parent.mkdir(parents=True, exist_ok=True)
+        JHARVIS_MSGS.write_text(json.dumps(msgs, indent=2))
+    return item
+
+@app.get("/api/jharvis/home")
+def jharvis_home():
+    """The Jharvis home page: the single most urgent thing for the owner, what's next, and whether Jharvis is watching."""
+    inbox = jharvis_inbox(touch=False)
+    drafts, needs, problems = inbox["drafts"], inbox["needs_you"], inbox["problems"]
+    board_jobs = jobs_board()["jobs"]
+    queued = [j for j in board_jobs if j["status"] == "queued"]
+    approved = [j for j in board_jobs if j["status"] == "handoff"]  # approved, but the OS couldn't finish it
+    items = (
+        [{"kind": "problem", "title": p["text"][:140], "action": "Check the OS", "link": "#/activity"} for p in problems]
+        + ([{"kind": "needs_you", "title": f"{len(needs)} job{'s' if len(needs) != 1 else ''} need{'' if len(needs) != 1 else 's'} you",
+             "detail": f"{needs[0]['title']} at {needs[0]['company']}: {needs[0].get('needs_why') or 'a step only you can do'}",
+             "action": "Open jobs", "link": "#/jobs"}] if needs else [])
+        + ([{"kind": "drafts", "title": f"{len(drafts)} job draft{'s are' if len(drafts) != 1 else ' is'} ready for your Approve",
+             "detail": (lambda b: f"Best match: {b['title']} at {b['company']}, score {b.get('score')}.")(max(drafts, key=lambda j: j.get('score') or 0)),
+             "action": "Review drafts", "link": "#/jobs"}] if drafts else [])
+        + ([{"kind": "approved", "title": f"{len(approved)} approved application{'s' if len(approved) != 1 else ''} to finish on the PC",
+             "detail": "These sites need you to submit (no form I can fill). Open each, paste the draft, then tap I applied. "
+                       + ", ".join(f"{j['company']}" for j in approved[:4]) + ".",
+             "action": "Submit them", "link": "#/jobs"}] if approved else [])
+    )
+    # quick wins first: approving drafts, then submitting approved ones; needs-you is real work
+    items.sort(key=lambda i: {"problem": 0, "drafts": 1, "approved": 2, "needs_you": 3}[i["kind"]])
+    blanks = sum("[ADD" in (j.get("draft") or "") for j in drafts)
+    suggestion = ("Add the answers the drafts keep asking for (like US hours) to your standing answers once; future drafts stop asking."
+                  if blanks >= 2 else "All clear. I'll message you in Slack when something needs you.")
+    jobs_cron = next((j for j in list_jobs() if j.get("kind") == "jobs" and j.get("enabled")), None)
+    return {
+        "owner": {"name": owner.NAME, "timezone": owner.OWNER.get("timezone") or "UTC"},
+        "online": time.time() - _jharvis_seen["at"] < 420,
+        "urgent": items[0] if items else None,
+        "next": items[1:4] + ([{"kind": "queued", "title": f"{len(queued)} good matches queued for the next run"}] if queued else []),
+        "next_run": jobs_cron["cron"] if jobs_cron else None,
+        "agents": [check_agent(a) for a in AGENTS],
+        "suggestion": suggestion,
+        "last_run": inbox["last_run"],
+    }
+
+@app.get("/api/jharvis/inbox")
+def jharvis_inbox(touch: bool = True):
+    """What Jharvis should tell the owner about: job drafts waiting, jobs needing him, and anything broken."""
+    from jobs import pipeline
+    if touch:  # Jharvis's watcher polls this every few minutes: that is its heartbeat
+        _jharvis_seen["at"] = time.time()
+    from scheduler.scheduler import get_history
+    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+    problems = []
+    for a in AGENTS:
+        if check_agent(a)["status"] != "online":
+            problems.append({"id": f"agent-offline-{a}", "text": f"{a} is not installed or not on PATH"})
+    for e in get_history(200):
+        out = str(e.get("output", ""))
+        if e.get("type") == "job_done" and re.match(r"(Failed|⏱|⚠|opencode failed)", out):
+            problems.append({"id": f"job-{e.get('name')}-{str(e.get('timestamp', ''))[:10]}", "text": f"Schedule '{e.get('name')}' failed: {out[:200]}"})
+    last = board["runs"][0] if board["runs"] else None
+    if last and last.get("errors") and not last.get("fetched"):  # one feed being rate-limited is normal
+        problems.append({"id": f"run-{last['started']}", "text": "Job run problems: " + "; ".join(last["errors"])[:400]})
+    return {
+        "applied": [j for j in board["jobs"] if j["status"] in ("applied", "handoff", "closed") and j.get("applied_at")],
+        "drafts": [j for j in board["jobs"] if j["status"] == "drafted"],
+        "needs_you": [j for j in board["jobs"] if j["status"] == "needs_you"],
+        "last_run": last,
+        "problems": problems,
+        "dashboard": os.environ.get("AGENTIC_OS_DASHBOARD", owner.OWNER.get("dashboard_url") or "http://127.0.0.1:8810") + "/#/jobs",
+    }
+
 # ─── Routes: Audit ────────────────────────────────────────────────
 
 @app.get("/api/audit")
@@ -457,19 +725,29 @@ def get_cost():
         return {"entries": [], "daily_totals": {}, "monthly_projection": 0, "free_tier_alerts": []}
     return json.loads(cost_file.read_text())
 
-@app.post("/api/cost/record")
-def record_cost(data: dict):
+_cost_lock = threading.Lock()
+
+def append_cost(agent: str, tokens: int, cost: float, model: str):
+    with _cost_lock:
+        _append_cost(agent, tokens, cost, model)
+
+def _append_cost(agent: str, tokens: int, cost: float, model: str):
     cost_file = BASE_DIR / "data" / "cost-history.json"
     cost_data = json.loads(cost_file.read_text()) if cost_file.exists() else \
         {"entries": [], "daily_totals": {}, "monthly_projection": 0, "free_tier_alerts": []}
     cost_data["entries"].append({
         "timestamp": get_timestamp(),
-        "agent": data.get("agent", "unknown"),
-        "tokens": data.get("tokens", 0),
-        "cost": data.get("cost", 0.0),
-        "model": data.get("model", "unknown"),
+        "agent": agent,
+        "tokens": tokens,
+        "cost": cost,
+        "model": model,
     })
     cost_file.write_text(json.dumps(cost_data, indent=2))
+
+@app.post("/api/cost/record")
+def record_cost(data: dict):
+    append_cost(data.get("agent", "unknown"), data.get("tokens", 0),
+                data.get("cost", 0.0), data.get("model", "unknown"))
     return {"status": "recorded"}
 
 # ─── Routes: Registry/Plugins ─────────────────────────────────────
@@ -594,11 +872,11 @@ def get_scheduler_events(limit: int = Query(50, le=200)):
 
 @app.post("/api/scheduler/trigger/{job_id}")
 def trigger_job(job_id: str):
-    from scheduler.scheduler import get_job_by_id, run_skill
+    from scheduler.scheduler import get_job_by_id, run_job
     job = get_job_by_id(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    result = run_skill(job["skill"], trigger="manual")
+    result = run_job(job, trigger="manual")
     append_audit({"action": "job_triggered", "job_id": job_id, "skill": job["skill"]})
     return result
 
@@ -660,20 +938,20 @@ def generate_skill(data: dict):
         raise HTTPException(409, "Skill already exists")
     skill_dir.mkdir(parents=True)
     (skill_dir / "context").mkdir(exist_ok=True)
-    skill_md = f"""# {description}
+    instructions = data.get("instructions", "").strip() or description
+    agent = data.get("agent", "claude")
+    if agent not in AGENTS:
+        raise HTTPException(400, f"Agent must be one of: {', '.join(AGENTS)}")
+    skill_md = f"""---
+name: {name}
+description: {description}
+---
 
-{description}
+# {name.replace('-', ' ').title()}
 
-## Usage
-Generate this skill by running it with appropriate input.
+{instructions}
 
-## Input
-- Natural language description of what to do
-
-## Output
-- Executed task result
-
-## Primary: opencode
+## Primary: {agent}
 """
     (skill_dir / "SKILL.md").write_text(skill_md)
     (skill_dir / "learnings.md").write_text(f"# {name}\n\nAuto-generated skill.\n")
@@ -752,7 +1030,7 @@ def get_circuit_breaker():
 @app.post("/api/circuit-breaker/trip")
 def trip_circuit_breaker(data: dict):
     agent = data.get("agent", "")
-    if agent not in ["opencode", "hermes", "agy"]:
+    if agent not in AGENTS:
         raise HTTPException(400, "Invalid agent")
     state = _get_circuit_state()
     if agent not in state["agents"]:
@@ -769,7 +1047,7 @@ def trip_circuit_breaker(data: dict):
 @app.post("/api/circuit-breaker/reset")
 def reset_circuit_breaker(data: dict):
     agent = data.get("agent", "")
-    if agent not in ["opencode", "hermes", "agy"]:
+    if agent not in AGENTS:
         raise HTTPException(400, "Invalid agent")
     state = _get_circuit_state()
     state["agents"][agent] = {"state": "closed", "failures": 0, "opened_at": None}
@@ -821,8 +1099,35 @@ def save_chat_message(msg: dict):
         history["messages"] = history["messages"][-200:]
     CHAT_HISTORY_FILE.write_text(json.dumps(history, indent=2))
 
-def run_cli(args: list, timeout: int = 30) -> tuple:
-    r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+def resolve_cli(name: str) -> str:
+    # npm gives opencode a .cmd wrapper, which would pass the message through cmd.exe parsing; call the real exe.
+    if name == "opencode":
+        exe = Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "@opencode" / "cli" / "bin" / "opencode.exe"
+        if exe.exists():
+            return str(exe)
+    return name
+
+# Agents work here, never inside the OS code (on 26 Oct OpenCode committed into this repo from a session).
+AGENT_WORKDIR = Path(os.environ.get("AGENT_WORKDIR", str(BASE_DIR.parent / "agentic-os-workspace")))
+# Workers may READ the owner's projects (their plan modes block writes); Hermes gets no file tools (they can't be read-only).
+READ_ROOT = os.environ.get("AGENT_READ_ROOT", owner.OWNER.get("read_root") or str(BASE_DIR.parent))
+AGENT_RULES = (
+    "Rules: you plan and scope; you do not change anything. Don't create, edit or delete files, don't run "
+    f"git, and don't copy {owner.NAME}'s personal files anywhere. You may read files under {READ_ROOT}. Propose the plan and the exact "
+    f"changes; Jharvis makes them only after {owner.NAME} approves. If you need information from "
+    f"{owner.NAME}, write each question on its own line starting with 'QUESTION:' and don't repeat a question a "
+    "teammate already asked.\n\n"
+)
+
+def run_cli(args: list, timeout: int = 30, cwd: Optional[Path] = None) -> tuple:
+    args = [resolve_cli(args[0]), *args[1:]]
+    # stdin closed: opencode run otherwise waits on it and times out.
+    if cwd:
+        cwd.mkdir(parents=True, exist_ok=True)
+    # Claude Code prefers an API key when one is set; drop it so the owner's subscription is used, never API credit.
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+    r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       stdin=subprocess.DEVNULL, timeout=timeout, cwd=cwd, env=env)
     return r.returncode, r.stdout, r.stderr
 
 def clean_hermes_output(raw: str) -> str:
@@ -850,11 +1155,46 @@ def clean_hermes_output(raw: str) -> str:
     non_meta = [l.strip() for l in lines if l.strip() and not l.startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:', 'Duration:', 'Messages:'))]
     return '\n'.join(non_meta[-5:]) or raw
 
+def agent_model(agent: str, default: str) -> str:
+    sf = BASE_DIR / "data" / "settings.json"
+    settings = json.loads(sf.read_text()) if sf.exists() else {}
+    return settings.get("models", {}).get(agent, default)
+
+# Workers are read-only (plan modes / safe toolsets): only Jharvis makes changes, with the owner's approval where needed.
 def execute_agent(agent: str, message: str) -> str:
+    out = _execute_agent(agent, message)
+    # OpenCode Zen's free tier runs out; Claude (owner's subscription) picks the work up instead of failing the run.
+    if agent == "opencode" and out.startswith("opencode failed") and re.search(r"free.?(usage.?)?limit|429", out, re.I):
+        print("[agents] opencode free limit reached, using claude")
+        return _execute_agent("claude", message)
+    return out
+
+def _execute_agent(agent: str, message: str) -> str:
+    message = AGENT_RULES + message
     try:
-        if agent == "opencode":
+        if agent == "claude":
+            # Unmodified Claude Code on the owner's own subscription; the Agent SDK may not use it.
+            model = agent_model("claude", "sonnet")
             try:
-                code, out, err = run_cli(["opencode", "run", "--format", "json", message], timeout=30)
+                code, out, err = run_cli(["claude", "-p", message, "--output-format", "json",
+                                          "--model", model, "--permission-mode", "plan", "--add-dir", READ_ROOT], timeout=600, cwd=AGENT_WORKDIR)
+            except subprocess.TimeoutExpired:
+                return "⏱ Claude Code timed out after 10 minutes."
+            try:
+                result = json.loads(out)
+            except json.JSONDecodeError:
+                return (err or out or f"claude returned exit code {code}").strip()
+            usage = result.get("usage", {})
+            tokens = sum(usage.get(k, 0) for k in ("input_tokens", "output_tokens",
+                         "cache_creation_input_tokens", "cache_read_input_tokens"))
+            # Subscription: cost is what the API would have charged, not money spent.
+            append_cost("claude", tokens, result.get("total_cost_usd", 0.0), model)
+            return result.get("result", "").strip() or "**claude**" + chr(10)*2 + "Empty response."
+
+        elif agent == "opencode":
+            model = agent_model("opencode", "opencode/deepseek-v4.1-flash-free")
+            try:
+                code, out, err = run_cli(["opencode", "run", "--format", "json", "--agent", "plan", "-m", model, message], timeout=420, cwd=Path(READ_ROOT))
             except subprocess.TimeoutExpired:
                 return f"⏱ Agent 'opencode' timed out.\n\nOpenCode's model is taking too long. Try running `opencode run \"{message[:60]}\"` directly in your terminal.\n\n**Message:** {message[:100]}"
             if code == 0:
@@ -872,17 +1212,27 @@ def execute_agent(agent: str, message: str) -> str:
                     except (json.JSONDecodeError, KeyError):
                         continue
                 if response_text:
+                    # shortcut: opencode run JSON has no token/cost fields, so only the call is logged.
+                    append_cost("opencode", 0, 0.0, model)
                     return response_text.strip()
                 return f"**opencode**\n\nProcessed your message.\n\n**Message:** {message[:100]}"
             err_msg = (err or "").strip()
-            return err_msg or f"opencode returned exit code {code}"
+            for line in (out or "").splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "error" or "error" in event:
+                    err_msg = err_msg or json.dumps(event.get("error", event))[:400]
+            return f"opencode failed: {err_msg}" if err_msg else f"opencode returned exit code {code} with no message"
 
         elif agent == "hermes":
             try:
-                code, out, err = run_cli(["hermes", "chat", "-q", message], timeout=180)
+                code, out, err = run_cli(["hermes", "-z", message, "-t", "web,todo,memory,session_search"], timeout=420, cwd=AGENT_WORKDIR)
             except subprocess.TimeoutExpired:
                 return f"⏱ Hermes timed out.\n\nThe model took too long to respond. Try a shorter query or check your OpenRouter rate limits.\n\n**Message:** {message[:100]}"
             if code == 0:
+                append_cost("hermes", 0, 0.0, agent_model("hermes", "hermes default"))
                 cleaned = clean_hermes_output(out or "")
                 if cleaned:
                     return cleaned
@@ -895,7 +1245,7 @@ def execute_agent(agent: str, message: str) -> str:
 
         elif agent == "agy":
             try:
-                code, out, err = run_cli(["agy", "--print", message], timeout=60)
+                code, out, err = run_cli(["agy", "--print", message, "--mode", "plan", "--add-dir", READ_ROOT], timeout=420, cwd=AGENT_WORKDIR)
             except subprocess.TimeoutExpired:
                 return f"**agy timed out.**\n\nTry running `agy --print \"{message[:60]}\"` directly."
             combined = ((err or "") + " " + (out or "")).strip()
@@ -917,8 +1267,8 @@ def execute_agent(agent: str, message: str) -> str:
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     agent = req.agent.lower().strip()
-    if agent not in ["opencode", "hermes", "agy"]:
-        raise HTTPException(400, "Agent must be one of: opencode, hermes, agy")
+    if agent not in AGENTS:
+        raise HTTPException(400, f"Agent must be one of: {', '.join(AGENTS)}")
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(400, "Message cannot be empty")
@@ -932,9 +1282,13 @@ def chat(req: ChatRequest):
         "content": message,
         "timestamp": get_timestamp(),
     }
+    # Each CLI call starts fresh, so give the agent the recent turns of this chat.
+    recent = [m for m in load_chat_history().get("messages", []) if m.get("agent") == agent][-10:]
     save_chat_message(user_msg)
+    context = "\n\n".join(f"[{owner.NAME if m['role'] == 'user' else agent}]\n{m['content']}" for m in recent)
+    prompt = f"Earlier in this chat:\n{context}\n\n{owner.NAME} now says:\n{message}" if context else message
 
-    response_text = execute_agent(agent, message)
+    response_text = execute_agent(agent, prompt)
 
     agent_msg = {
         "id": str(uuid.uuid4())[:8],
@@ -948,6 +1302,270 @@ def chat(req: ChatRequest):
     append_audit({"action": "chat_message", "agent": agent, "msg_preview": message[:50]})
 
     return {"status": "ok", "response": agent_msg}
+
+# ─── Routes: Sessions (agents working at the same time) ──────────
+
+SESSION_DIR = BASE_DIR / "data" / "sessions"
+
+class SessionRequest(BaseModel):
+    message: str
+    agents: list[str]
+    rounds: int = 2
+
+class SessionMessage(BaseModel):
+    message: str
+
+def session_prompt(agent: str, others: list, messages: list) -> str:
+    transcript = "\n\n".join(f"[{m.get('agent') or owner.NAME}]\n{m['content']}" for m in messages)
+    return (
+        f"You are '{agent}' ({TEAM_ROLES[agent]}) in a live session with "
+        + ", ".join(f"{o} ({TEAM_ROLES[o]})" for o in others) + f", all answering {owner.NAME} at the same time. Stay in your role.\n"
+        "Build on your teammates' latest points instead of repeating them, and say so when one is wrong. "
+        "Stay focused and concise. When the work is complete, end with a line that says only DONE.\n\n"
+        f"Conversation:\n{transcript}\n\nYour turn:"
+    )
+
+def save_session(sess: dict):
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    (SESSION_DIR / f"{sess['id']}.json").write_text(json.dumps(sess, indent=2))
+
+def run_session(sess: dict):
+    from concurrent.futures import ThreadPoolExecutor
+    agents = sess["agents"]
+    for _ in range(sess["rounds"]):
+        sess["round"] += 1
+        sess["working"] = list(agents)
+        save_session(sess)
+        snapshot = list(sess["messages"])
+        with ThreadPoolExecutor(len(agents)) as pool:
+            outs = list(pool.map(lambda a: (a, execute_agent(a, session_prompt(a, [o for o in agents if o != a], snapshot))), agents))
+        all_done = True
+        for agent, out in outs:
+            done = out.rstrip().endswith("DONE")
+            all_done &= done
+            sess["messages"].append({"role": "agent", "agent": agent, "round": sess["round"],
+                                     "content": out.rstrip().removesuffix("DONE").rstrip(), "timestamp": get_timestamp()})
+        sess["working"] = []
+        save_session(sess)
+        if all_done:
+            break
+    sess["status"] = "idle"
+    save_session(sess)
+    append_audit({"action": "session_round", "session": sess["id"], "agents": ",".join(agents)})
+
+def start_session_thread(sess: dict):
+    sess["status"] = "running"
+    save_session(sess)
+    threading.Thread(target=run_session, args=(sess,), daemon=True).start()
+
+@app.post("/api/sessions")
+def create_session(req: SessionRequest):
+    agents = list(dict.fromkeys(a.lower().strip() for a in req.agents))
+    if len(agents) < 2 or any(a not in AGENTS for a in agents):
+        raise HTTPException(400, f"Pick at least two of: {', '.join(AGENTS)}")
+    message = req.message.strip()
+    if not message or len(message) > 10000:
+        raise HTTPException(400, "Message must be 1-10000 characters")
+    sess = {"id": str(uuid.uuid4())[:8], "title": message[:80], "agents": agents,
+            "rounds": max(1, min(req.rounds, 4)), "round": 0, "working": [], "created": get_timestamp(),
+            "messages": [{"role": "user", "agent": None, "round": 0, "content": message, "timestamp": get_timestamp()}]}
+    start_session_thread(sess)
+    return sess
+
+@app.post("/api/sessions/{session_id}/message")
+def session_message(session_id: str, req: SessionMessage):
+    sess = get_session(session_id)
+    if sess["status"] == "running":
+        raise HTTPException(409, "Agents are still answering; wait for this round to finish")
+    if not req.message.strip():
+        raise HTTPException(400, "Message cannot be empty")
+    sess["messages"].append({"role": "user", "agent": None, "round": sess["round"], "content": req.message.strip(), "timestamp": get_timestamp()})
+    start_session_thread(sess)
+    return sess
+
+@app.get("/api/sessions")
+def list_sessions(limit: int = Query(30, le=200)):
+    if not SESSION_DIR.exists():
+        return {"sessions": []}
+    files = sorted(SESSION_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+    return {"sessions": [json.loads(f.read_text()) for f in files]}
+
+@app.get("/api/sessions/list")
+def list_replay_sessions():
+    """Session archive used by the Session Replay page (must stay above
+    /api/sessions/{session_id} or the dynamic route swallows it)."""
+    try:
+        sessions = []
+        sessions_dir = Path.home() / ".local" / "share" / "opencode"
+        log_dir = sessions_dir / "log"
+        if log_dir.exists():
+            for f in sorted(log_dir.glob("*.log"), reverse=True)[:20]:
+                sessions.append({
+                    "id": f.stem,
+                    "name": f.stem,
+                    "size": f.stat().st_size,
+                    "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+                    "source": "opencode",
+                })
+        hermes_sessions = Path.home() / ".hermes" / "sessions.json"
+        if hermes_sessions.exists():
+            sessions.append({
+                "id": "hermes-sessions",
+                "name": "Hermes Session Archive",
+                "size": hermes_sessions.stat().st_size,
+                "modified": datetime.fromtimestamp(hermes_sessions.stat().st_mtime).isoformat(),
+                "source": "hermes",
+            })
+        return {"sessions": sessions}
+    except Exception as e:
+        return {"sessions": [], "error": str(e)}
+
+@app.get("/api/sessions/{session_id}")
+def get_session(session_id: str):
+    validate_identifier(session_id, r"^[a-f0-9]{8}$", "session id")
+    f = SESSION_DIR / f"{session_id}.json"
+    if not f.exists():
+        raise HTTPException(404, "Session not found")
+    return json.loads(f.read_text())
+
+# ─── Routes: Connections (MCP servers, per agent) ────────────────
+
+def mcp_add_args(agent: str, name: str, url: str, command: list) -> list:
+    if url:
+        return {"claude": ["claude", "mcp", "add", "--transport", "http", "--scope", "user", name, url],
+                "opencode": ["opencode", "mcp", "add", "--global", name, "--url", url],
+                "hermes": ["hermes", "mcp", "add", name, "--url", url],
+                "agy": ["agy", "mcp", "add", "--type", "http", name, url]}[agent]
+    return {"claude": ["claude", "mcp", "add", "--scope", "user", name, "--", *command],
+            "opencode": ["opencode", "mcp", "add", "--global", name, "--", *command],
+            "hermes": ["hermes", "mcp", "add", name, "--command", command[0], *(["--args", *command[1:]] if command[1:] else [])],
+            "agy": ["agy", "mcp", "add", name, *command]}[agent]
+
+class ConnectionRequest(BaseModel):
+    name: str
+    url: str = ""
+    command: str = ""
+    agents: list[str]
+
+@app.get("/api/connections")
+def list_connections():
+    from concurrent.futures import ThreadPoolExecutor
+    def one(agent):
+        try:
+            code, out, err = run_cli([agent, "mcp", "list"], timeout=90)
+            return agent, {"ok": code == 0, "text": (out or err).strip()}
+        except Exception as e:
+            return agent, {"ok": False, "text": str(e)}
+    with ThreadPoolExecutor(len(AGENTS)) as pool:
+        return dict(pool.map(one, AGENTS))
+
+@app.post("/api/connections")
+def add_connection(req: ConnectionRequest):
+    import shlex
+    validate_identifier(req.name, r"^[a-zA-Z0-9_-]{1,40}$", "connection name")
+    url, command = req.url.strip(), shlex.split(req.command.strip(), posix=False)
+    if bool(url) == bool(command):
+        raise HTTPException(400, "Give either a URL (remote server) or a command (local server)")
+    if url and not re.match(r"^https?://", url):
+        raise HTTPException(400, "URL must start with http:// or https://")
+    results = {}
+    for agent in req.agents:
+        if agent not in AGENTS:
+            raise HTTPException(400, f"Unknown agent: {agent}")
+        code, out, err = run_cli(mcp_add_args(agent, req.name, url, command), timeout=120)
+        results[agent] = {"ok": code == 0, "text": (out or err).strip()[-400:]}
+    append_audit({"action": "connection_added", "name": req.name, "agents": ",".join(req.agents)})
+    return results
+
+@app.get("/api/models/{agent}")
+def list_models(agent: str):
+    if agent == "claude":
+        return {"models": ["sonnet", "opus", "haiku"], "current": agent_model("claude", "sonnet")}
+    if agent == "opencode":
+        code, out, _ = run_cli(["opencode", "models"], timeout=60)
+        zen = [m.strip() for m in out.splitlines() if m.strip().startswith("opencode/")]
+        return {"models": zen, "current": agent_model("opencode", "opencode/deepseek-v4.1-flash-free")}
+    raise HTTPException(404, "Model choice is only offered for claude and opencode")
+
+# ─── Routes: Team (agent-to-agent handoffs) ──────────────────────
+
+TEAM_DIR = BASE_DIR / "data" / "team"
+TEAM_ROLES = {
+    "claude": "careful writing and hard reasoning",
+    "opencode": "code, checks and quick bulk work",
+    "hermes": "scheduling, reminders and messaging the owner's phone",
+    "agy": "web research",
+}
+HANDOFF_RE = re.compile(r"^\s*HANDOFF:\s*(\w+)\s*:\s*(.+)$", re.MULTILINE)
+
+class TeamRequest(BaseModel):
+    message: str
+    agent: str = "claude"
+    max_hops: int = 5
+
+def team_prompt(agent: str, task: str, steps: list) -> str:
+    roster = "\n".join(f"- {a}: {r}" for a, r in TEAM_ROLES.items() if a != agent)
+    history = "\n\n".join(f"[{s['agent']}]\n{s['output']}" for s in steps)
+    return (
+        f"You are '{agent}' on {owner.NAME}'s Agentic OS team. Teammates:\n{roster}\n\n"
+        "Do your part of the task. If a teammate should continue, end with exactly one line:\n"
+        "HANDOFF: <teammate>: <what they should do>\n"
+        "Leave that line out when the task is finished. Never send anything outside this OS yourself.\n\n"
+        + (f"Work so far:\n{history}\n\n" if history else "")
+        + f"Your task: {task}"
+    )
+
+def save_thread(thread: dict):
+    TEAM_DIR.mkdir(parents=True, exist_ok=True)
+    (TEAM_DIR / f"{thread['id']}.json").write_text(json.dumps(thread, indent=2))
+
+def run_team(thread: dict, max_hops: int):
+    agent, task = thread["start_agent"], thread["message"]
+    for _ in range(max_hops):
+        thread["active"] = agent
+        save_thread(thread)
+        output = execute_agent(agent, team_prompt(agent, task, thread["steps"]))
+        handoff = HANDOFF_RE.findall(output)
+        nxt = handoff[-1] if handoff else None
+        thread["steps"].append({"agent": agent, "task": task, "output": HANDOFF_RE.sub("", output).strip(),
+                                "handoff_to": nxt[0].lower() if nxt else None, "timestamp": get_timestamp()})
+        if not nxt or nxt[0].lower() not in TEAM_ROLES or nxt[0].lower() == agent:
+            break
+        agent, task = nxt[0].lower(), nxt[1].strip()
+    thread["active"] = None
+    thread["status"] = "done"
+    save_thread(thread)
+    append_audit({"action": "team_run", "thread": thread["id"], "hops": len(thread["steps"])})
+
+@app.post("/api/team")
+def start_team(req: TeamRequest):
+    import threading
+    agent = req.agent.lower().strip()
+    if agent not in AGENTS:
+        raise HTTPException(400, f"Agent must be one of: {', '.join(AGENTS)}")
+    message = req.message.strip()
+    if not message or len(message) > 10000:
+        raise HTTPException(400, "Message must be 1-10000 characters")
+    thread = {"id": str(uuid.uuid4())[:8], "message": message, "start_agent": agent,
+              "status": "running", "active": agent, "steps": [], "created": get_timestamp()}
+    save_thread(thread)
+    threading.Thread(target=run_team, args=(thread, max(1, min(req.max_hops, 5))), daemon=True).start()
+    return thread
+
+@app.get("/api/team")
+def list_team(limit: int = Query(30, le=200)):
+    if not TEAM_DIR.exists():
+        return {"threads": []}
+    files = sorted(TEAM_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+    return {"threads": [json.loads(f.read_text()) for f in files]}
+
+@app.get("/api/team/{thread_id}")
+def get_team(thread_id: str):
+    validate_identifier(thread_id, r"^[a-f0-9]{8}$", "thread id")
+    f = TEAM_DIR / f"{thread_id}.json"
+    if not f.exists():
+        raise HTTPException(404, "Thread not found")
+    return json.loads(f.read_text())
 
 @app.get("/api/chat/history")
 def get_chat_history(q: str = Query(""), agent: str = Query(""), limit: int = Query(200, le=1000)):
@@ -994,8 +1612,8 @@ async def chat_upload(
 ):
     """Chat with an optional file attachment (multipart/form-data, v4.0)."""
     agent = agent.lower().strip()
-    if agent not in ["opencode", "hermes", "agy"]:
-        raise HTTPException(400, "Agent must be one of: opencode, hermes, agy")
+    if agent not in AGENTS:
+        raise HTTPException(400, f"Agent must be one of: {', '.join(AGENTS)}")
 
     raw = await file.read(UPLOAD_MAX_BYTES + 1)
     if len(raw) > UPLOAD_MAX_BYTES:
@@ -1456,7 +2074,7 @@ def search_journal(q: str = Query("")):
 def get_agent_health():
     try:
         agents = []
-        for name in ["opencode", "hermes", "agy"]:
+        for name in AGENTS:
             info = check_agent(name)
             info["uptime"] = 0
             info["success_rate"] = 100
@@ -1469,7 +2087,7 @@ def get_agent_health():
 @app.get("/api/agents/{name}/stats")
 def get_agent_stats(name: str):
     try:
-        if name not in ["opencode", "hermes", "agy"]:
+        if name not in AGENTS:
             raise HTTPException(400, "Invalid agent")
         info = check_agent(name)
         return {
@@ -1490,7 +2108,7 @@ def get_agent_stats(name: str):
 def refresh_agent_health():
     try:
         agents = []
-        for name in ["opencode", "hermes", "agy"]:
+        for name in AGENTS:
             info = check_agent(name)
             agents.append(info)
         append_audit({"action": "agent_health_refreshed"})
@@ -1528,7 +2146,7 @@ def router_suggest(data: RouterSuggest):
 def router_route(data: RouterRoute):
     try:
         agent = data.agent.lower()
-        if agent not in ["opencode", "hermes", "agy"]:
+        if agent not in AGENTS:
             return {"status": "error", "message": f"Invalid agent: {agent}"}
         append_audit({"action": "task_routed", "agent": agent, "task_preview": data.task[:50]})
         return {
@@ -1585,34 +2203,9 @@ def get_trend_analytics():
         return {"trends": [], "error": str(e)}
 
 # ─── Routes: Session Replay (2 endpoints) ───────────────────────
-
-@app.get("/api/sessions/list")
-def list_sessions():
-    try:
-        sessions = []
-        sessions_dir = Path.home() / ".local" / "share" / "opencode"
-        log_dir = sessions_dir / "log"
-        if log_dir.exists():
-            for f in sorted(log_dir.glob("*.log"), reverse=True)[:20]:
-                sessions.append({
-                    "id": f.stem,
-                    "name": f.stem,
-                    "size": f.stat().st_size,
-                    "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
-                    "source": "opencode",
-                })
-        hermes_sessions = Path.home() / ".hermes" / "sessions.json"
-        if hermes_sessions.exists():
-            sessions.append({
-                "id": "hermes-sessions",
-                "name": "Hermes Session Archive",
-                "size": hermes_sessions.stat().st_size,
-                "modified": datetime.fromtimestamp(hermes_sessions.stat().st_mtime).isoformat(),
-                "source": "hermes",
-            })
-        return {"sessions": sessions}
-    except Exception as e:
-        return {"sessions": [], "error": str(e)}
+# NOTE: GET /api/sessions/list lives next to the other /api/sessions
+# routes on purpose — FastAPI matches routes in registration order, so a
+# static "list" path must be registered before /api/sessions/{session_id}.
 
 MAX_SESSION_CONTENT = 2000
 
@@ -1676,7 +2269,19 @@ dashboard_dir = BASE_DIR / "dashboard"
 if dashboard_dir.exists():
     app.mount("/dashboard", StaticFiles(directory=str(dashboard_dir)), name="dashboard")
 
+WEB_DIST = BASE_DIR / "web" / "dist"
+if (WEB_DIST / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=str(WEB_DIST / "assets")), name="web-assets")
+if (WEB_DIST / "agents").exists():
+    app.mount("/agents", StaticFiles(directory=str(WEB_DIST / "agents")), name="web-agent-logos")
+
 @app.get("/", response_class=HTMLResponse)
+def web_index():
+    # React dashboard (web/, built with `npm run build`); upstream's old dashboard only if it isn't built.
+    if (WEB_DIST / "index.html").exists():
+        return HTMLResponse((WEB_DIST / "index.html").read_text())
+    return index()
+
 def index():
     html_file = BASE_DIR / "dashboard" / "index.html"
     if html_file.exists():
@@ -1708,10 +2313,14 @@ for _asset in ("styles.css", "utils.js", "api.js", "app.js"):
 
 # ─── Favicon ──────────────────────────────────────────────────────
 
-FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><defs><linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#6c5ce7"/><stop offset="100%" stop-color="#fd79a8"/></linearGradient></defs><rect width="32" height="32" rx="8" fill="url(#g)"/><polygon points="16,6 24,11 24,21 16,26 8,21 8,11" fill="none" stroke="white" stroke-width="2" stroke-linejoin="round"/><circle cx="16" cy="16" r="3" fill="white"/></svg>'
+FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><defs><linearGradient id="chrome" gradientUnits="userSpaceOnUse" x1="28" y1="28" x2="228" y2="228"><stop offset="0" stop-color="#5B6F86"/><stop offset=".55" stop-color="#1F2D44"/><stop offset="1" stop-color="#0E1726"/></linearGradient><linearGradient id="ice" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="256" y2="256"><stop offset="0" stop-color="#B9ECFF"/><stop offset="1" stop-color="#3FB6EC"/></linearGradient></defs><path d="M188.8 73.5A82 82 0 1 1 155 50.6" fill="none" stroke="url(#chrome)" stroke-width="18" stroke-linecap="round"/><circle cx="210" cy="128" r="12" fill="url(#chrome)"/><circle cx="128" cy="210" r="16" fill="url(#chrome)"/><circle cx="46" cy="128" r="20" fill="url(#chrome)"/><circle cx="198" cy="58" r="22" fill="url(#ice)"/></svg>'  # Orbit logo
 
 @app.get("/favicon.ico")
 def favicon():
+    return Response(content=FAVICON_SVG, media_type="image/svg+xml")
+
+@app.get("/logo.svg")
+def logo_svg():
     return Response(content=FAVICON_SVG, media_type="image/svg+xml")
 
 @app.get("/favicon.svg")
@@ -1726,8 +2335,8 @@ MANIFEST_JSON = {
     "description": "Multi-agent orchestration platform",
     "start_url": "/",
     "display": "standalone",
-    "background_color": "#0f0f23",
-    "theme_color": "#6c5ce7",
+    "background_color": "#E6EEF4",
+    "theme_color": "#E6EEF4",
     "icons": [
         {"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
     ],
@@ -1758,7 +2367,7 @@ def service_worker():
 if __name__ == "__main__":
     import uvicorn
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--port", type=int, default=8810)
     parser.add_argument("--host", type=str, default="127.0.0.1")
     args = parser.parse_args()
     uvicorn.run(app, host=args.host, port=args.port)

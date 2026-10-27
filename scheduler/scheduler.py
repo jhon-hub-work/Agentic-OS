@@ -97,6 +97,13 @@ def run_skill(skill_name: str, trigger: str = "scheduler", input_text: str = "")
     return {"status": "triggered", "skill": skill_name, "trigger": trigger}
 
 
+def run_job(job: dict, trigger: str = "cron"):
+    """Hand a job to the server, which registers a listener that actually runs it."""
+    emit_event({"type": "job_run", "job": {k: v for k, v in job.items() if k != "_file"},
+                "trigger": trigger, "status": "started"})
+    return {"status": "triggered", "job": job.get("name"), "trigger": trigger}
+
+
 # ─── File Watcher ─────────────────────────────────────────────
 
 class JobFileWatcher:
@@ -184,9 +191,9 @@ class CronScheduler:
                 continue
             try:
                 self._scheduler.add_job(
-                    run_skill,
+                    run_job,
                     CT.from_crontab(data["cron"]),
-                    args=[data["skill"], "cron"],
+                    args=[data, "cron"],
                     id=data.get("id", data["name"]),
                     name=data["name"],
                     replace_existing=True,

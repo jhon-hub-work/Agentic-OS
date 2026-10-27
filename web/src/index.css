@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+/* Glacier: 60 ice-frost mesh, 30 frozen glass, 10 navy chrome. */
+@theme {
+  --font-sans: "Geist", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+
+  --color-ice: #E6EEF4;
+  --color-ink: #1D2B3A;
+  --color-ink-2: #4E6072;
+  --color-ink-3: #7C8B99;
+  --color-navy: #1F2D44;
+  --color-navy-deep: #0E1726;
+  --color-steel: #5B6F86;
+  --color-ok: #2E7D62;
+  --color-warn: #A0661B;
+  --color-bad: #B23A3A;
+
+  --ease-glide: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+html { background: var(--color-ice); color: var(--color-ink); }
+body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
+::selection { background: rgba(31, 45, 68, 0.15); }
+
+/* 60: frost mesh, fixed so it never repaints while scrolling */
+.frost-mesh {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  background:
+    radial-gradient(60% 50% at 8% 0%, #FFFFFF 0%, transparent 70%),
+    radial-gradient(55% 60% at 100% 100%, #CFE3F2 0%, transparent 70%),
+    radial-gradient(40% 40% at 70% 20%, #DCE8F1 0%, transparent 70%),
+    var(--color-ice);
+}
+
+/* 30: frozen glass. Outer shell + inner core (double bezel) */
+.glass-shell {
+  background: rgba(255, 255, 255, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  border-radius: 1.75rem;
+  padding: 0.375rem;
+  box-shadow: 0 24px 48px -28px rgba(29, 43, 58, 0.28);
+}
+.glass {
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.95);
+  border-radius: calc(1.75rem - 0.375rem);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 1);
+}
+.glass-bar {
+  background: rgba(240, 246, 250, 0.62);
+  backdrop-filter: blur(22px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+}
+
+.glass-bar.sheet { background: rgba(240, 246, 250, 0.94); box-shadow: 0 -12px 40px -16px rgba(29, 43, 58, 0.35); }
+
+/* 10: navy chrome */
+.chrome {
+  background: linear-gradient(120deg, #5B6F86 0%, #1F2D44 55%, #0E1726 100%);
+  color: #EEF4F9;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 10px 24px -12px rgba(14, 23, 38, 0.55);
+}
+.chrome-text {
+  background: linear-gradient(120deg, #5B6F86, #1F2D44 60%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+.prose-glacier > * + * { margin-top: 0.6em; }
+.prose-glacier h1, .prose-glacier h2, .prose-glacier h3 { font-size: 0.95rem; font-weight: 500; margin-top: 1em; }
+.prose-glacier ul, .prose-glacier ol { padding-left: 1.2em; list-style: disc; }
+.prose-glacier ol { list-style: decimal; }
+.prose-glacier code { font-family: var(--font-mono); font-size: 0.85em; background: rgba(31, 45, 68, 0.07); padding: 0.1em 0.35em; border-radius: 6px; }
+.prose-glacier pre { background: #0E1726; color: #DCE6F0; padding: 0.9em 1em; border-radius: 14px; overflow-x: auto; }
+.prose-glacier pre code { background: none; padding: 0; color: inherit; }
+.prose-glacier table { width: 100%; border-collapse: collapse; font-size: 0.85em; display: block; overflow-x: auto; }
+.prose-glacier th, .prose-glacier td { text-align: left; padding: 0.45em 0.7em; border-bottom: 1px solid rgba(255, 255, 255, 0.9); }
+.prose-glacier th { color: var(--color-ink-2); font-weight: 500; }
+.prose-glacier th, .prose-glacier td { overflow-wrap: normal; min-width: 4.5em; }
+.prose-glacier a { color: var(--color-navy); text-decoration: underline; }
+.prose-glacier strong { font-weight: 500; }
+
+.shimmer {
+  background: linear-gradient(90deg, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0.85) 50%, rgba(255,255,255,0.35) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+@keyframes shimmer { to { background-position: -200% 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer { animation: none; }
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass-bar { background: #F0F6FA; backdrop-filter: none; }
+  .glass { background: #FBFDFE; }
+}

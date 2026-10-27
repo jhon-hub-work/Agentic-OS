@@ -22,7 +22,7 @@ async function renderSettings() {
       <div class="card">
         <div class="card-header"><span class="card-title">🤖 Agent Preferences</span></div>
         <div class="grid grid-3">
-          ${['opencode', 'hermes', 'agy'].map(a => `
+          ${['claude', 'opencode', 'hermes', 'agy'].map(a => `
             <div class="card" style="padding:14px">
               <div class="flex items-center gap-2 mb-2">
                 <div class="agent-dot ${prefs[a] && prefs[a].enabled !== false ? 'online' : 'offline'}" style="width:10px;height:10px"></div>
@@ -46,7 +46,7 @@ async function renderSettings() {
         <div class="form-row">
           <div class="form-group">
             <label class="form-label">Port</label>
-            <input id="setPort" class="form-input" type="number" value="${dashboard.port || 8080}">
+            <input id="setPort" class="form-input" type="number" value="${dashboard.port || 8810}">
           </div>
           <div class="form-group">
             <label class="form-label">Host</label>
@@ -127,7 +127,7 @@ async function saveAllSettings() {
         agy: { enabled: document.getElementById('agent_agy').checked, binary: document.getElementById('bin_agy').value },
       },
       dashboard: {
-        port: parseInt(document.getElementById('setPort').value) || 8080,
+        port: parseInt(document.getElementById('setPort').value) || 8810,
         host: document.getElementById('setHost').value || '127.0.0.1',
         dark_mode: document.getElementById('setDarkMode').checked,
       },
@@ -167,8 +167,8 @@ async function resetSettings() {
 async function confirmReset() {
   const defaults = {
     theme: 'dark',
-    agent_preferences: { opencode: { enabled: true, binary: 'opencode' }, hermes: { enabled: true, binary: 'hermes' }, agy: { enabled: true, binary: 'agy' } },
-    dashboard: { port: 8080, host: '127.0.0.1', dark_mode: true },
+    agent_preferences: { claude: { enabled: true, binary: 'claude' }, opencode: { enabled: true, binary: 'opencode' }, hermes: { enabled: true, binary: 'hermes' }, agy: { enabled: true, binary: 'agy' } },
+    dashboard: { port: 8810, host: '127.0.0.1', dark_mode: true },
     api_keys: { gemini: '', openrouter: '' },
     free_tier_limits: { gemini_flash: { requests_per_day: 1500, tokens_per_day: 1000000 }, openrouter_free: { requests_per_day: 100, tokens_per_day: 200000 } },
   };

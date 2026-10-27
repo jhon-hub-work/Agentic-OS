@@ -1,0 +1,22 @@
+{
+  "name": "Alex",
+  "timezone": "UTC",
+  "cv_path": "",
+  "answers_path": "",
+  "hoot_dir": "",
+  "read_root": "",
+  "hermes_home": "",
+  "system_python": "python",
+  "dashboard_url": "http://127.0.0.1:8810",
+  "profile_summary": "a freelancer looking for remote work",
+  "salary_line": "",
+  "private_client": "a client",
+  "pay": {
+    "min_hourly_usd": 15,
+    "min_hourly_onlinejobs_usd": 8,
+    "min_monthly_usd": 1000,
+    "min_per_piece_usd": 3
+  },
+  "resume_pdf": "",
+  "auto_apply": false
+}

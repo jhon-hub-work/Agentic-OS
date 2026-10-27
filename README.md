@@ -1,3 +1,28 @@
+<p align="center"><img src="brand/concepts/v2/c-orbit.svg" width="96" alt="Agentic OS logo"/></p>
+
+# Agentic OS
+
+One place to run four AI agents as a team, with **Jharvis** as the boss. Fork of
+[modimihir07/agentic-os](https://github.com/modimihir07/agentic-os) (MIT), rebuilt around:
+
+- **4 agents**: Claude Code (headless `claude -p` on your own subscription), OpenCode (Zen models),
+  Hermes Agent, and agy (research). Workers run read-only (plan modes); only the boss makes changes.
+- **Jharvis** (separate repo) plans, picks agents, checks work, and talks to you in Slack and on the dashboard.
+- **Team runs** (agents hand work to each other), **Sessions** (2-4 agents side by side), **Chats**.
+- **Schedules** that really run (agent, team, skill or the job search), **skills** you can add, **MCP connections** per agent.
+- **Job pipeline**: finds jobs, filters by your rules, scores (OpenCode), drafts (Claude); nothing is sent until you
+  tap Approve, then it applies like Hoot (OnlineJobs reply, Greenhouse/Lever/Ashby forms) or hands it to you.
+- **Billing**: every agent call logged with tokens and cost.
+- **Dashboard**: React 19 + Vite + Tailwind 4, "Glacier" design, Three.js voice-wave home page that reacts to your mic.
+
+Setup: copy `config/owner.example.json` to `config/owner.json` and fill in your details (it stays out of git).
+Run on Windows: `pwsh -File start.ps1` then open http://127.0.0.1:8810.
+Desktop app (Tauri 2, ~9 MB): `cd desktop && npm install && npx tauri build --no-bundle`, then run
+`desktop/src-tauri/target/release/agentic-os.exe`; it opens the dashboard as soon as the OS is running. Phone access over the network needs the token
+in `data/auth-token` (`?token=` once).
+
+---
+
 <div align="center">
   <br/>
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"/>

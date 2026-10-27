@@ -1,0 +1,13 @@
+{
+  "id": "bb2cb416",
+  "name": "Daily job search",
+  "kind": "jobs",
+  "agent": "claude",
+  "prompt": "Find, filter, score and draft job applications (Hoot rules).",
+  "skill": null,
+  "cron": "0 23 * * *",
+  "enabled": true,
+  "created": "2026-10-26T23:10:48.061261+00:00",
+  "last_run": "2026-10-27T07:31:14.400964+00:00",
+  "next_run": null
+}

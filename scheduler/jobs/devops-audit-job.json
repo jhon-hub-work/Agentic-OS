@@ -3,7 +3,7 @@
   "name": "DevOps Audit",
   "skill": "devops-audit",
   "cron": "0 8 * * 1",
-  "enabled": true,
+  "enabled": false,
   "created": "2026-05-17T00:00:00Z",
   "last_run": null,
   "next_run": null,

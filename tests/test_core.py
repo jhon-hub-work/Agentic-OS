@@ -26,10 +26,10 @@ class CoreEndpointTests(unittest.TestCase):
         self.assertEqual(data.get("status"), "healthy")
         self.assertIn("agents", data)
 
-    def test_three_agents_present(self):
+    def test_all_agents_present(self):
         _, data = self.h.api("GET", "/api/status")
         names = {a.get("name") for a in data.get("agents", [])}
-        self.assertEqual(names, {"opencode", "hermes", "agy"})
+        self.assertEqual(names, {"claude", "opencode", "hermes", "agy"})
 
     def test_skills_list(self):
         status, data = self.h.api("GET", "/api/skills")
@@ -127,6 +127,17 @@ class CoreEndpointTests(unittest.TestCase):
     def test_manifest_served(self):
         status, _ = self.h.request("GET", "/manifest.json")
         self.assertEqual(status, 200)
+
+
+class NeedsOwnerTests(unittest.TestCase):
+    def test_owner_only_asks(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from jobs.pipeline import needs_owner
+        self.assertEqual(needs_owner({"jd": "Edit our reels in Premiere. Send CV and portfolio.", "draft": "Hi"}), "")
+        self.assertTrue(needs_owner({"jd": "Please attach a voice recording introducing yourself."}))
+        self.assertTrue(needs_owner({"jd": "Send a short Loom video about you."}))
+        self.assertTrue(needs_owner({"jd": "Shortlisted people do a paid trial task."}))
+        self.assertTrue(needs_owner({"jd": "ok", "draft": "My rate is [ADD: rate]"}))
 
 
 if __name__ == "__main__":
