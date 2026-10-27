@@ -67,6 +67,10 @@ def main(path: str) -> dict:
             return {"outcome": "handoff", "reason": f"not sent: {why}"}
         res = applier.send_olj(job["url"], subject, job["draft"])
         return {"outcome": "submitted" if res["outcome"] == "sent" else res["outcome"], **{k: v for k, v in res.items() if k != "outcome"}}
+    if "reddit.com/" in job["url"]:
+        # Reddit [Hiring] post: same as OnlineJobs, a DM from the owner's account (signed in in Hoot's Brave).
+        import reddit_dm
+        return reddit_dm.send(job, followup=job.get("mode") == "followup")
     form = ats_url(job["url"])
     if not form:
         return {"outcome": "handoff", "reason": "this site isn't a form the OS can fill (no Greenhouse/Lever/Ashby link); apply on the site"}

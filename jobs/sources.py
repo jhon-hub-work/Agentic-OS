@@ -33,8 +33,10 @@ def _get(url: str, tries: int = 3) -> str:
             req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json, application/rss+xml, text/xml, */*"})
             with urllib.request.urlopen(req, timeout=30) as r:
                 return r.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError:
-            raise
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or i == tries - 1:     # Reddit rate-limits the second feed; wait it out
+                raise
+            time.sleep(15 * 2 ** i)
         except OSError:
             if i == tries - 1:
                 raise

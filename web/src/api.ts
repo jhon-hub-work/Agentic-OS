@@ -12,7 +12,7 @@ export type Session = { id: string; title: string; agents: AgentName[]; rounds: 
 export type Job = { id: string; name: string; kind: 'agent' | 'team' | 'skill'; agent: AgentName; prompt: string; skill?: string | null; cron: string; enabled: boolean; last_run: string | null; description?: string }
 export type JobEvent = { type: string; job_id?: string; name?: string; output?: string; trigger?: string; timestamp: string }
 
-export type JobPost = { id: string; title: string; company: string; url: string; source: string; pay?: string; score?: number; reason?: string; lane: string; status: 'new' | 'queued' | 'drafted' | 'draft_blocked' | 'needs_you' | 'approved' | 'applying' | 'handoff' | 'closed' | 'skipped' | 'applied'; draft: string; problem?: string; apply_result?: string; needs_why?: string; found: string }
+export type JobPost = { id: string; title: string; company: string; url: string; source: string; pay?: string; score?: number; reason?: string; lane: string; status: 'new' | 'queued' | 'drafted' | 'draft_blocked' | 'needs_you' | 'approved' | 'applying' | 'handoff' | 'closed' | 'skipped' | 'applied' | 'replied'; draft: string; applied_at?: string; follow_up?: 'due' | 'done'; followup_draft?: string; followup_problem?: string; problem?: string; apply_result?: string; needs_why?: string; found: string }
 export type JobRun = { started: string; finished?: string; fetched: number; new: number; kept: number; scored: number; drafted: number; needs_you: number; errors: string[] }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -53,7 +53,8 @@ export const api = {
   saveModels: (models: Record<string, string>) => req<unknown>('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { models } }) }),
   jobsBoard: () => req<{ jobs: JobPost[]; runs: JobRun[]; running: boolean }>('/api/jobs'),
   runJobSearch: () => req<unknown>('/api/jobs/run', { method: 'POST' }),
-  decideJob: (id: string, decision: 'approve' | 'skip' | 'applied') =>
+  addIndeedJob: (url: string) => req<JobPost>('/api/jobs/add', { method: 'POST', body: JSON.stringify({ url }) }),
+  decideJob: (id: string, decision: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') =>
     req<JobPost>(`/api/jobs/${id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) }),
   threads: () => req<{ threads: Thread[] }>('/api/team'),
   thread: (id: string) => req<Thread>(`/api/team/${id}`),

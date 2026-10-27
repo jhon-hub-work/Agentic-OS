@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import owner
@@ -112,7 +112,10 @@ def draft(job: dict, run_agent, cv: str, answers: str) -> str:
     prompt = (
         f"Write {owner.NAME}'s application message for this job. Reply with only the message text.\n\n{DRAFT_RULES}"
         + ("- This goes straight to an OnlineJobs.ph employer once approved: NO [ADD: ...] blanks or brackets. "
-           "Leave out anything you don't know instead.\n" if "onlinejobs.ph" in job.get("url", "") else "") + "\n"
+           "Leave out anything you don't know instead.\n" if "onlinejobs.ph" in job.get("url", "") else "")
+        + ("- This is a Reddit DM to the poster, not a cover letter: 60-90 words (overrides the length rule above), "
+           "casual and direct, no subject line or sign-off block, end with the portfolio link.\n"
+           if (job.get("source") or "").startswith("reddit") else "") + "\n"
         f"# Job\n{job['title']} at {job['company']} ({job['url']})\nPay: {job.get('pay') or 'not stated'}\n"
         f"{(job.get('jd') or '')[:3000]}\n\n# CV\n{cv}\n\n# Standing answers\n{answers}"
     )
@@ -172,7 +175,7 @@ def run(run_agent, log=print, after=None) -> dict:
     stats = {"started": now(), "fetched": 0, "new": 0, "kept": 0, "scored": 0, "drafted": 0, "needs_you": 0, "errors": []}
 
     note = lambda m: log(m) or (stats["errors"].append(m) if "failed" in m else None)
-    offers = hoot_offers(log=note) + sources.fetch_all(log=note)  # applyable ones first
+    offers = hoot_offers(log=note) + sources.fetch_all(log=note) + indeed_alert_offers(seen, log=note)  # applyable ones first
     stats["fetched"] = len(offers)
     known = {same_job(j) for j in board["jobs"]}
     fresh = []
@@ -240,14 +243,124 @@ def run(run_agent, log=print, after=None) -> dict:
     return stats
 
 
+def read_indeed(link: str, source: str = "Indeed") -> dict:
+    """One Indeed job read in Hoot's Brave (system Python has Playwright), as an offer. Raises ValueError."""
+    import os
+    import subprocess
+    py = os.environ.get("HOOT_PYTHON", owner.OWNER.get("system_python") or "python")
+    r = subprocess.run([py, str(Path(__file__).with_name("indeed_read.py")), link], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=300)
+    got = json.loads((r.stdout or '{"error": "reader crashed"}').strip().splitlines()[-1])
+    if got.get("error"):
+        raise ValueError(got["error"])
+    return {"source": source, "url": got["url"], "company": "Indeed", "title": got["title"], "location": "",
+            "pay": "", "jd": got["text"]}
+
+
+INDEED_MAX = 10  # alert jobs read per run (one Brave page each)
+
+
+def indeed_alert_offers(seen: set, log=print) -> list:
+    """Jobs from Indeed's job-alert emails to the owner. Only links Indeed mailed him: Indeed is never searched."""
+    from . import indeed_alerts
+    try:
+        urls = [u for u in indeed_alerts.links() if job_id(u) not in seen][:INDEED_MAX]
+    except Exception as e:  # noqa: BLE001 - the other boards still run
+        log(f"source Indeed alerts failed: {e!r}")
+        return []
+    out = []
+    for u in urls:
+        try:
+            out.append(read_indeed(u, "Indeed alert"))
+        except ValueError as e:
+            log(f"Indeed alert job skipped ({u}): {e}")
+    log(f"source Indeed alerts: {len(out)} postings")
+    return out
+
+
+def add_link(link: str, run_agent) -> dict:
+    """One Indeed job the owner pasted: read it in Hoot's Brave, score, draft, and put it on the board whatever the
+    score. Approving it hands it back to him (apply_runner can't fill Indeed), so he finishes the apply there."""
+    j = read_indeed(link)
+    with BOARD_LOCK:
+        if any(x["id"] == job_id(j["url"]) for x in load(BOARD, {"jobs": []})["jobs"]):
+            raise ValueError("that job is already on the board")
+    score_batch([j], run_agent)
+    text = draft(j, run_agent, CV.read_text(encoding="utf-8") if CV.exists() else "",
+                 ANSWERS.read_text(encoding="utf-8") if ANSWERS.exists() else "")
+    problem = leaks(text)
+    item = {k: j.get(k) for k in ("source", "url", "company", "location", "pay", "score", "reason", "needs_you", "needs_why")}
+    item.update(id=job_id(j["url"]), title=j["title"], lane=lanes.kind_of(j["title"]), found=now(), jd=j["jd"][:3000],
+                draft=text, problem=problem, status="draft_blocked" if problem else "needs_you" if j.get("needs_you") else "drafted")
+    with BOARD_LOCK:
+        board = load(BOARD, {"jobs": [], "runs": []})
+        board["jobs"] = ([item] + board["jobs"])[:300]
+        save(BOARD, board)
+    return item
+
+
+FOLLOW_AFTER_H = 48
+
+
+def followups_due() -> list:
+    """Applied jobs with no reply FOLLOW_AFTER_H hours on and no follow-up yet (one follow-up per job)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=FOLLOW_AFTER_H)).isoformat()
+    return [j for j in load(BOARD, {"jobs": []})["jobs"] if j["status"] == "applied" and (j.get("applied_at") or "z") < cutoff
+            and not j.get("followed_up_at") and not j.get("follow_up")]
+
+
+def draft_followup(job: dict, run_agent) -> str:
+    prompt = (f"Write {owner.NAME}'s short follow-up to an application sent {FOLLOW_AFTER_H}+ hours ago with no reply. "
+              "Reply with only the message text.\n\n" + DRAFT_RULES +
+              "- 30-60 words (overrides the length rule above): friendly nudge, still keen, one line on fit, no guilt.\n\n"
+              f"# Job\n{job['title']} at {job['company']}\n\n# The first message\n{job.get('draft') or '(not saved)'}")
+    return run_agent("claude", prompt).strip()
+
+
+def platform(url: str) -> str:
+    for name, host in (("OnlineJobs", "onlinejobs.ph"), ("Reddit", "reddit.com"), ("Indeed", "indeed.com"), ("X", "x.com"),
+                       ("Instagram", "instagram.com"), ("Facebook", "facebook.com"), ("LinkedIn", "linkedin.com")):
+        if host in (url or ""):
+            return name
+    return "Other boards"
+
+
+EXPORT_COLS = ("platform", "title", "company", "status", "score", "pay", "found", "applied_at", "followed_up_at",
+               "replied_at", "apply_result", "url")
+
+
+def export_rows() -> list:
+    return [{c: platform(j.get("url")) if c == "platform" else j.get(c, "") for c in EXPORT_COLS}
+            for j in load(BOARD, {"jobs": []})["jobs"]]
+
+
+APPROVABLE = ("drafted", "needs_you", "handoff")  # approving twice, or while applying, would send twice
+
+
+class StateError(Exception):
+    pass
+
+
 def decide(jid: str, decision: str) -> dict:
     """approve / skip / applied. Approving starts the apply step (server.apply_approved)."""
+    if decision in ("replied", "followed_up"):  # tracking marks from the owner; status stays readable in exports
+        with BOARD_LOCK:
+            board = load(BOARD, {"jobs": [], "runs": []})
+            for j in board["jobs"]:
+                if j["id"] == jid:
+                    j.update({"status": "replied", "replied_at": now()} if decision == "replied"
+                             else {"followed_up_at": now(), "follow_up": "done"})
+                    save(BOARD, board)
+                    return j
+        raise KeyError(jid)
     if decision not in ("approve", "skip", "applied"):
         raise ValueError("decision must be approve, skip or applied")
     with BOARD_LOCK:
         board = load(BOARD, {"jobs": [], "runs": []})
         for j in board["jobs"]:
             if j["id"] == jid:
+                if decision == "approve" and j["status"] not in APPROVABLE:
+                    raise StateError(f"can't approve a job that is {j['status']}")
                 j["status"] = {"approve": "approved", "skip": "skipped", "applied": "applied"}[decision]
                 j["decided"] = now()
                 save(BOARD, board)

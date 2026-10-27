@@ -53,7 +53,14 @@ def _save_history(event: dict):
             history = history[-1000:]
         tmp = HISTORY_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(history, indent=2))
-        os.replace(tmp, HISTORY_FILE)
+        for attempt in range(10):  # Windows refuses the replace while get_history has the file open
+            try:
+                os.replace(tmp, HISTORY_FILE)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
 
 def get_history(limit: int = 100) -> list:
     if not HISTORY_FILE.exists():

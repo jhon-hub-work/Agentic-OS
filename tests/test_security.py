@@ -117,6 +117,80 @@ class SecurityTests(unittest.TestCase):
             status, _ = self.h.api("GET", f"/api/brain/{evil}")
             self.assertNotEqual(status, 200, f"brain traversal slipped: {evil}")
 
+    def test_brain_file_windows_paths_rejected(self):
+        for evil in [quote(r"C:\Windows\win.ini", safe=""), quote(r"..\..\server.py", safe=""),
+                     quote(r"\\host\share\x.md", safe=""), quote(r"C:\x\evil.md", safe=""), "notes.txt"]:
+            status, _ = self.h.api("GET", f"/api/brain/{evil}")
+            self.assertEqual(status, 400, f"brain path accepted: {evil}")
+            status, _ = self.h.api("PUT", f"/api/brain/{evil}", {"content": "x"})
+            self.assertEqual(status, 400, f"brain write accepted: {evil}")
+
+    def test_brain_file_valid_name_works(self):
+        status, data = self.h.api("GET", "/api/brain/memory.md")
+        self.assertEqual(status, 200)
+        self.assertEqual(data.get("name"), "memory.md")
+
+    def test_diff_ref_option_injection_rejected(self):
+        target = self.h.tmp / "pwned.txt"
+        for evil in [f"--output={target}", "-p", "--no-index", "HEAD;rm", "HEAD x"]:
+            status, _ = self.h.api("GET", f"/api/diff?file=server.py&ref={quote(evil, safe='')}")
+            self.assertEqual(status, 400, f"diff ref accepted: {evil}")
+        self.assertFalse(target.exists())
+
+    def test_diff_valid_ref_passes_validation(self):
+        # no server.py in the temp state dir: 404 means the ref itself was accepted
+        status, _ = self.h.api("GET", "/api/diff?file=missing.py&ref=HEAD~1")
+        self.assertEqual(status, 404)
+
+    def test_foreign_host_rejected(self):
+        for host in ["evil.example", "evil.example:8810", "127.0.0.1.evil.example", "localhost.evil.example"]:
+            status, _ = self.h.api("GET", "/api/status", headers={"Host": host})
+            self.assertEqual(status, 403, f"host accepted: {host}")
+
+    def test_local_ip_and_tailscale_hosts_allowed(self):
+        for host in ["127.0.0.1:8810", "localhost:8810", "[::1]:8810", "192.168.1.5:8810",
+                     "100.64.0.7", "pc.tail1234.ts.net", "pc.tail1234.ts.net:8810"]:
+            status, _ = self.h.api("GET", "/api/status", headers={"Host": host})
+            self.assertEqual(status, 200, f"host rejected: {host}")
+
+    def test_cross_site_write_rejected(self):
+        for origin in ["http://evil.example", "null", "http://127.0.0.1.evil.example"]:
+            status, _ = self.h.api("POST", "/api/agents/health/refresh", headers={"Origin": origin})
+            self.assertEqual(status, 403, f"cross-site write accepted from {origin}")
+
+    def test_same_origin_and_originless_writes_allowed(self):
+        for headers in [{}, {"Origin": self.h.base_url}, {"Origin": "http://127.0.0.1:8810"}]:
+            status, _ = self.h.api("POST", "/api/agents/health/refresh", headers=headers)
+            self.assertEqual(status, 200, f"write rejected with {headers}")
+        # reads with a foreign Origin still answer (CORS keeps the response from the page)
+        status, _ = self.h.api("GET", "/api/status", headers={"Origin": "http://evil.example"})
+        self.assertEqual(status, 200)
+
+    def test_connections_write_needs_loopback(self):
+        import server
+        from types import SimpleNamespace
+        req = server.ConnectionRequest(name="x", command="evil.exe", agents=["claude"])
+        with self.assertRaises(server.HTTPException) as ctx:
+            server.add_connection(req, SimpleNamespace(client=SimpleNamespace(host="100.64.0.7")))
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_token_redacted_in_access_log(self):
+        import logging
+        import server
+        rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                                ("1.2.3.4:5", "GET", f"/?token={server.AUTH_TOKEN}&x=1", "1.1", 200), None)
+        server.RedactTokenFilter().filter(rec)
+        self.assertNotIn(server.AUTH_TOKEN, rec.getMessage())
+        self.assertIn("token=REDACTED&x=1", rec.getMessage())
+
+    def test_job_approve_only_from_approvable_states(self):
+        import jobs.pipeline as pipeline
+        for s in ["applied", "applying", "approved", "skipped", "queued"]:
+            pipeline.save(pipeline.BOARD, {"jobs": [{"id": "abcdef0123", "title": "t", "company": "c", "status": s}],
+                                           "runs": []})
+            status, _ = self.h.api("POST", "/api/jobs/abcdef0123/decision", {"decision": "approve"})
+            self.assertEqual(status, 409, f"approve allowed from {s}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

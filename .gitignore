@@ -32,3 +32,4 @@ PLAN.md
 web/node_modules/
 web/dist/
 config/owner.json
+config/gmail.json

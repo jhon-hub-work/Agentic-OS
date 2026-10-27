@@ -24,6 +24,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import server  # noqa: E402  (must import after sys.path setup)
 import scheduler.scheduler as sched  # noqa: E402
 import brain.memory_search as mem  # noqa: E402
+import jobs.pipeline as pipeline  # noqa: E402
 
 
 def get_free_port() -> int:
@@ -55,6 +56,8 @@ class Harness:
         server.GOALS_FILE = self.tmp / "data" / "goals.json"
         server.JOURNAL_DIR = self.tmp / "brain" / "journal"
         server.UPLOAD_DIR = self.tmp / "data" / "uploads"
+
+        pipeline.BOARD = self.tmp / "data" / "jobs" / "board.json"
 
         sched.BASE_DIR = self.tmp / "scheduler"
         sched.JOBS_DIR = self.tmp / "scheduler" / "jobs"
@@ -142,11 +145,11 @@ class Harness:
 
     # ── HTTP helper (stdlib only) ─────────────────────────────
     def request(self, method: str, path: str, body: dict = None,
-                timeout: float = 15.0) -> tuple:
+                timeout: float = 15.0, headers: dict = None) -> tuple:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
             self.base_url + path, data=data, method=method,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **(headers or {})},
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -156,9 +159,9 @@ class Harness:
             return e.code, e.read()
 
     def api(self, method: str, path: str, body: dict = None,
-            timeout: float = 15.0) -> tuple:
+            timeout: float = 15.0, headers: dict = None) -> tuple:
         """Returns (status_code, parsed_json_or_raw_text)."""
-        status, raw = self.request(method, path, body, timeout)
+        status, raw = self.request(method, path, body, timeout, headers)
         try:
             parsed = json.loads(raw.decode("utf-8")) if raw else None
         except (json.JSONDecodeError, UnicodeDecodeError):

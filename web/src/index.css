@@ -176,3 +176,7 @@ body.sucking { filter: var(--suck, none); }
   .glass-bar { background: #F0F6FA; backdrop-filter: none; }
   .glass { background: #FBFDFE; }
 }
+
+/* No visible scrollbars (Jhon, 27 Oct); pages still scroll with wheel, touch and keys. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; }

@@ -43,6 +43,18 @@ export default function App() {
     addEventListener('hashchange', on)
     return () => removeEventListener('hashchange', on)
   }, [])
+  useEffect(() => {
+    if (!inApp) return
+    // The desktop webview drops new-tab links and downloads: the OS opens them in the default browser instead.
+    const on = (e: MouseEvent) => {
+      const a = (e.target as Element).closest?.('a[href]') as HTMLAnchorElement | null
+      if (!a || !(a.target === '_blank' || a.hasAttribute('download'))) return
+      e.preventDefault()
+      fetch('/api/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: a.href }) })
+    }
+    document.addEventListener('click', on, true)
+    return () => document.removeEventListener('click', on, true)
+  }, [])
   const go = (id: string) => { location.hash = `/${id}` }
 
   return (

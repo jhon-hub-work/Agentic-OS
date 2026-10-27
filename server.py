@@ -6,6 +6,7 @@ Multi-agent orchestration server for opencode, Hermes, agy CLI
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -19,10 +20,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -63,9 +65,10 @@ if HERMES_ENV.exists():
                 os.environ[k] = v  # last value wins (matches shell sourcing)
 
 # CORS for local dev
+CORS_ORIGINS = ["http://127.0.0.1:8810", "http://localhost:8810"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8810", "http://localhost:8810"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,9 +99,23 @@ if not AUTH_TOKEN_FILE.exists():
     AUTH_TOKEN_FILE.write_text(secrets.token_urlsafe(32))
 AUTH_TOKEN = AUTH_TOKEN_FILE.read_text().strip()
 
+# DNS rebinding needs a hostname, so only loopback names, bare IP literals and Tailscale names are served.
+ALLOWED_HOST_RE = re.compile(r"^(localhost|\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:.]+\]|[a-z0-9.-]+\.ts\.net)(:\d+)?$")
+
+def is_loopback(request) -> bool:
+    return bool(request.client) and request.client.host in ("127.0.0.1", "::1")
+
 class TokenAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        if request.client and request.client.host in ("127.0.0.1", "::1"):
+        host = request.headers.get("host", "").lower()
+        if not ALLOWED_HOST_RE.match(host):
+            return Response("Forbidden host", status_code=403)
+        # CSRF: a browser always sends Origin on cross-site writes; Jharvis, curl and native apps send none.
+        origin = request.headers.get("origin")
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE") and origin is not None
+                and origin not in CORS_ORIGINS and urlsplit(origin).netloc.lower() != host):
+            return Response("Forbidden origin", status_code=403)
+        if is_loopback(request):
             return await call_next(request)
         given = (request.query_params.get("token")
                  or request.cookies.get("aos_token")
@@ -108,7 +125,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         if request.query_params.get("token"):
             response.set_cookie("aos_token", AUTH_TOKEN, httponly=True, samesite="strict",
-                                max_age=60 * 60 * 24 * 365)
+                                secure=request.url.scheme == "https", max_age=60 * 60 * 24 * 365)
         return response
 
 def secrets_compare(a: str, b: str) -> bool:
@@ -116,6 +133,15 @@ def secrets_compare(a: str, b: str) -> bool:
     return bool(a) and hmac.compare_digest(a.encode(), b.encode())
 
 app.add_middleware(TokenAuthMiddleware)
+
+class RedactTokenFilter(logging.Filter):
+    """Keep ?token= out of data/server.log (uvicorn access log args: client, method, path, version, status)."""
+    def filter(self, record):
+        if isinstance(record.args, tuple) and len(record.args) >= 3 and isinstance(record.args[2], str):
+            record.args = record.args[:2] + (re.sub(r"(token=)[^&\s]*", r"\1REDACTED", record.args[2]),) + record.args[3:]
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(RedactTokenFilter())
 
 BASE_DIR = Path(__file__).parent.resolve()
 
@@ -157,6 +183,21 @@ def read_file(path: Path):
 def write_file(path: Path, content: str):
     path.write_text(content, encoding="utf-8")
     return True
+
+def write_atomic(path: Path, text: str):
+    """tmp + os.replace, so a poll never reads half a file. Windows refuses the replace while a reader
+    has the file open, so retry briefly."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text)
+    for attempt in range(10):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
 
 def list_dir(path: Path):
     if not path.exists():
@@ -275,8 +316,7 @@ def list_brain():
 
 @app.get("/api/brain/{file_name}")
 def get_brain_file(file_name: str):
-    if ".." in file_name or "/" in file_name:
-        raise HTTPException(400, "Invalid file name")
+    validate_identifier(file_name, r"^[\w-]+\.md$", "file name")
     path = BASE_DIR / "brain" / file_name
     if not path.exists() or path.is_dir():
         raise HTTPException(404, "File not found")
@@ -284,8 +324,7 @@ def get_brain_file(file_name: str):
 
 @app.put("/api/brain/{file_name}")
 def update_brain_file(file_name: str, data: BrainUpdate):
-    if ".." in file_name or "/" in file_name:
-        raise HTTPException(400, "Invalid file name")
+    validate_identifier(file_name, r"^[\w-]+\.md$", "file name")
     path = BASE_DIR / "brain" / file_name
     write_file(path, data.content)
     append_audit({"action": "brain_update", "file": file_name})
@@ -299,7 +338,7 @@ def list_skills():
     for d in sorted((BASE_DIR / "skills").iterdir()):
         if d.is_dir() and not d.name.startswith("_"):
             skill_md = read_file(d / "SKILL.md")
-            learnings = read_file(d / "learnings.md")
+            learnings_path = d / "learnings.md"
             eval_data = {}
             eval_path = d / "eval.json"
             if eval_path.exists():
@@ -311,7 +350,7 @@ def list_skills():
             skills.append({
                 "name": d.name,
                 "description": skill_md[:200] if skill_md else "",
-                "has_learnings": bool(learnings),
+                "has_learnings": learnings_path.exists() and learnings_path.stat().st_size > 0,
                 "eval_criteria": eval_data.get("criteria", []),
                 "scores": score_history,
             })
@@ -396,7 +435,9 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
         f"- Input: {skill_input or '(none)'}\n"
         f"- Output: {response_text[:500]}\n"
     )
-    write_file(path / "learnings.md", existing + new_entry)
+    # keep the hand-written head and the newest 50 run entries; the file grew without bound (heartbeat: 73 KB)
+    parts = re.split(r"(?=\n## [^\n]*\(Run )", existing + new_entry)
+    write_file(path / "learnings.md", parts[0] + "".join(parts[1:][-50:]))
 
     # Log execution
     append_audit({
@@ -501,6 +542,14 @@ def mark_interrupted_runs():
                 run[field] = None if field == "active" else []
                 run["interrupted"] = True
                 f.write_text(json.dumps(run, indent=2))
+    from jobs import pipeline  # an apply killed by a restart (or still waiting its turn) would never be approvable again
+    with pipeline.BOARD_LOCK:
+        board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+        stuck = [j for j in board["jobs"] if j["status"] in ("approved", "applying")]
+        for j in stuck:
+            j.update(status="handoff", apply_result="interrupted by a restart")
+        if stuck:
+            pipeline.save(pipeline.BOARD, board)
 
 def handle_scheduler_event(event: dict):
     if event.get("type") == "job_run":
@@ -520,7 +569,10 @@ def run_scheduled(job: dict, trigger: str):
             out = run_skill(job["skill"], SkillRunRequest(input=job.get("prompt", ""), agent=job.get("agent", "auto")))["output"]
     except Exception as e:
         out = f"Failed: {e}"
-    emit_event({"type": "job_done", "job_id": job.get("id"), "name": job.get("name"), "trigger": trigger, "output": out[:2000]})
+    try:
+        emit_event({"type": "job_done", "job_id": job.get("id"), "name": job.get("name"), "trigger": trigger, "output": out[:2000]})
+    except Exception as e:  # a history write failure must not lose the audit entry and last_run below
+        print(f"[scheduler] job_done event not saved: {e}")
     append_audit({"action": "job_run", "job": job.get("name"), "agent": job.get("agent"), "output_preview": out[:100]})
     for f in (BASE_DIR / "scheduler" / "jobs").glob("*.json"):
         data = json.loads(f.read_text())
@@ -539,7 +591,8 @@ def run_job_pipeline() -> dict:
     try:
         stats = pipeline.run(execute_agent, log=lambda m: print(f"[jobs] {m}"),
                              after=auto_apply_clean if owner.OWNER.get("auto_apply") else None)
-        append_audit({"action": "jobs_run", "output_preview": f"{stats['drafted']} drafted, {stats['auto_sent']} sent, {stats['needs_you']} need {owner.NAME}"})
+        stats["followed_up"] = run_followups()
+        append_audit({"action": "jobs_run", "output_preview": f"{stats['drafted']} drafted, {stats['auto_sent']} sent, {stats['followed_up']} followed up, {stats['needs_you']} need {owner.NAME}"})
         return stats
     finally:
         _jobs_lock.release()
@@ -549,11 +602,55 @@ def jobs_run():
     threading.Thread(target=run_job_pipeline, daemon=True).start()
     return {"status": "started"}
 
+@app.post("/api/jobs/add")
+def jobs_add(data: dict):
+    """An Indeed link the owner pasted (paste-only: the OS never searches Indeed)."""
+    from jobs import pipeline
+    link = str(data.get("url", "")).strip()
+    if not re.match(r"^https://([a-z]{2,3}\.)?indeed\.com/\S+$", link):
+        raise HTTPException(400, "paste one Indeed job link")
+    try:
+        job = pipeline.add_link(link, execute_agent)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    append_audit({"action": "job_added", "job": job["title"], "output_preview": f"score {job.get('score')}"})
+    return job
+
+@app.post("/api/open")
+def open_link(data: dict, request: Request):
+    """The desktop app's webview drops target=_blank links: it asks the OS to open them in the default browser."""
+    url = str(data.get("url", ""))
+    if not is_loopback(request) or not re.match(r"^https?://\S+$", url):
+        raise HTTPException(400, "only http(s) links, only from this PC")
+    os.startfile(url)
+    return {"opened": url}
+
+@app.get("/api/jobs/export.xlsx")
+def jobs_export_xlsx():
+    """Every job and where it stands, formatted (table, colours, Status dropdown); opens in Google Sheets."""
+    from jobs import export_xlsx, pipeline
+    data = export_xlsx.build(pipeline.load(pipeline.BOARD, {"jobs": []})["jobs"])
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="jobs-{datetime.now():%Y-%m-%d}.xlsx"'})
+
+@app.get("/api/jobs/export.html")
+def jobs_export_print():
+    """The same table as a print page: the browser's Print > Save as PDF makes the PDF."""
+    import html as h
+    from jobs import pipeline
+    cols = ("platform", "title", "company", "status", "score", "applied_at", "followed_up_at", "replied_at")
+    rows = "".join("<tr>" + "".join(f"<td>{h.escape(str(r[c] or '')[:16] if c.endswith('_at') else str(r[c] or ''))}</td>" for c in cols)
+                   + "</tr>" for r in pipeline.export_rows())
+    head = "".join(f"<th>{c.replace('_at', '').replace('_', ' ')}</th>" for c in cols)
+    return HTMLResponse(f"""<!doctype html><meta charset="utf-8"><title>Jobs {datetime.now():%Y-%m-%d}</title>
+<style>body{{font:12px system-ui;margin:24px}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:4px 6px;text-align:left}}th{{background:#eee}}</style>
+<h2>Job applications, {datetime.now():%d %b %Y}</h2><table><tr>{head}</tr>{rows}</table><script>print()</script>""")
+
 @app.get("/api/jobs")
 def jobs_board():
     from jobs import pipeline
     board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
-    board["running"] = _jobs_lock.locked()
+    board["running"] = _jobs_lock.locked() or _apply_lock.locked()
     return board
 
 @app.post("/api/jobs/{jid}/decision")
@@ -564,6 +661,8 @@ def jobs_decision(jid: str, data: dict):
         job = pipeline.decide(jid, str(data.get("decision", "")))
     except KeyError:
         raise HTTPException(404, "Job not found")
+    except pipeline.StateError as e:
+        raise HTTPException(409, str(e))
     except ValueError as e:
         raise HTTPException(400, str(e))
     append_audit({"action": "job_decision", "job": job["title"], "decision": job["status"]})
@@ -572,27 +671,58 @@ def jobs_decision(jid: str, data: dict):
     return job
 
 HOOT_PYTHON = os.environ.get("HOOT_PYTHON", owner.OWNER.get("system_python") or "python")
+_apply_lock = threading.Lock()  # one apply at a time (one Brave), manual Approves and auto_apply alike
 
 def apply_approved(jid: str):
     """Run jobs/apply_runner.py (system Python has Playwright) and record the outcome on the board."""
+    with _apply_lock:
+        return _apply_approved(jid)
+
+def run_apply_runner(job: dict) -> dict:
+    """jobs/apply_runner.py on one job (system Python has Playwright); always one result dict. Hold _apply_lock."""
     import tempfile
-    from jobs import pipeline
-    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
-    job = next((j for j in board["jobs"] if j["id"] == jid), None)
-    if not job:
-        return
-    pipeline.set_fields(jid, status="applying")
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
         json.dump(job, f)
     try:
         r = subprocess.run([HOOT_PYTHON, str(BASE_DIR / "jobs" / "apply_runner.py"), f.name], capture_output=True,
                            text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=1200,
                            env={k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")})
-        res = json.loads((r.stdout or "").strip().splitlines()[-1])
+        return json.loads((r.stdout or "").strip().splitlines()[-1])
     except Exception as e:  # noqa: BLE001
-        res = {"outcome": "handoff", "reason": f"apply step crashed: {type(e).__name__}"}
+        return {"outcome": "handoff", "reason": f"apply step crashed: {type(e).__name__}"}
     finally:
         os.unlink(f.name)
+
+def run_followups() -> int:
+    """No reply 48 h after applying: Reddit gets one follow-up DM (unless the poster replied in the inbox); other
+    sites can't be messaged again by the OS, so the follow-up is drafted and waits under Follow up for the owner."""
+    from jobs import pipeline
+    sent = 0
+    for j in pipeline.followups_due():
+        text = pipeline.draft_followup(j, execute_agent)
+        problem = pipeline.leaks(text)
+        if problem or "reddit.com/" not in j["url"] or not owner.OWNER.get("auto_apply"):
+            pipeline.set_fields(j["id"], follow_up="due", followup_draft=text, followup_problem=problem)
+            continue
+        with _apply_lock:
+            res = run_apply_runner({**j, "mode": "followup", "followup_draft": text})
+        if res.get("outcome") == "replied":
+            pipeline.set_fields(j["id"], status="replied", replied_at=pipeline.now())
+        elif res.get("outcome") == "followed_up":
+            pipeline.set_fields(j["id"], follow_up="done", followed_up_at=pipeline.now(), followup_draft=text)
+            sent += 1
+        else:
+            pipeline.set_fields(j["id"], follow_up="due", followup_draft=text, followup_problem=res.get("reason", ""))
+    return sent
+
+def _apply_approved(jid: str):
+    from jobs import pipeline
+    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+    job = next((j for j in board["jobs"] if j["id"] == jid), None)
+    if not job:
+        return
+    pipeline.set_fields(jid, status="applying")
+    res = run_apply_runner(job)
     status = {"submitted": "applied", "closed": "closed"}.get(res.get("outcome"), "handoff")
     pipeline.set_fields(jid, status=status, apply_result=res.get("reason") or res.get("outcome"), applied_at=pipeline.now())
     append_audit({"action": "job_apply", "job": job["title"], "output_preview": f"{status}: {res.get('reason', '')}"[:100]})
@@ -610,7 +740,10 @@ def auto_apply_clean() -> int:
         if why:
             pipeline.set_fields(j["id"], status="needs_you", needs_you=True, needs_why=why)
             continue
-        pipeline.decide(j["id"], "approve")
+        try:
+            pipeline.decide(j["id"], "approve")
+        except pipeline.StateError:  # the owner skipped it or it is already going
+            continue
         sent += apply_approved(j["id"]) == "applied"
     return sent
 
@@ -644,15 +777,14 @@ def jharvis_panel_show(p: JharvisPanel):
         raise HTTPException(400, "id and title required, at most 20 lines")
     with _msgs_lock:
         panels = [x for x in _panels() if x["id"] != p.id] + [{"id": p.id, "title": p.title[:120], "lines": [l[:300] for l in p.lines]}]
-        JHARVIS_PANELS.parent.mkdir(parents=True, exist_ok=True)
-        JHARVIS_PANELS.write_text(json.dumps(panels[-6:], indent=2))
+        write_atomic(JHARVIS_PANELS, json.dumps(panels[-6:], indent=2))
     return {"status": "shown"}
 
 @app.delete("/api/jharvis/panels/{pid}")
 def jharvis_panel_close(pid: str):
     with _msgs_lock:
         panels = [] if pid == "all" else [x for x in _panels() if x["id"] != pid]
-        JHARVIS_PANELS.write_text(json.dumps(panels, indent=2))
+        write_atomic(JHARVIS_PANELS, json.dumps(panels, indent=2))
     return {"status": "closed"}
 
 STT_PYTHON = os.environ.get("JHARVIS_PYTHON", "C:/Users/Admin-PC/Documents/Jharvis/.venv/Scripts/python.exe")
@@ -705,8 +837,7 @@ def jharvis_post(msg: JharvisMessage):
         item = {"id": str(uuid.uuid4())[:8], "role": msg.role, "text": msg.text.strip(), "timestamp": get_timestamp(),
                 "mood": msg.mood if msg.mood in ("good", "urgent") else "normal"}
         msgs = (msgs + [item])[-500:]
-        JHARVIS_MSGS.parent.mkdir(parents=True, exist_ok=True)
-        JHARVIS_MSGS.write_text(json.dumps(msgs, indent=2))
+        write_atomic(JHARVIS_MSGS, json.dumps(msgs, indent=2))
     return item
 
 class SpeakRequest(BaseModel):
@@ -801,7 +932,10 @@ def get_audit(limit: int = Query(100, le=500)):
     audit_file = BASE_DIR / "audit" / "audit.log"
     if not audit_file.exists():
         return {"entries": []}
-    lines = audit_file.read_text().strip().split("\n")
+    with open(audit_file, "rb") as f:  # the log only grows: read the tail (~2 KB per entry is plenty)
+        start = max(0, f.seek(0, os.SEEK_END) - limit * 2048)
+        f.seek(start)
+        lines = f.read().decode("utf-8", errors="replace").split("\n")[1 if start else 0:]
     entries = [json.loads(l) for l in lines if l.strip()]
     return {"entries": entries[-limit:]}
 
@@ -831,6 +965,7 @@ def _append_cost(agent: str, tokens: int, cost: float, model: str):
         "cost": cost,
         "model": model,
     })
+    cost_data["entries"] = cost_data["entries"][-500:]
     cost_file.write_text(json.dumps(cost_data, indent=2))
 
 @app.post("/api/cost/record")
@@ -1170,23 +1305,29 @@ def discover_standards():
 
 CHAT_HISTORY_FILE = BASE_DIR / "data" / "chat-history.json"
 
+_chat_lock = threading.RLock()
+
 def load_chat_history():
-    if not CHAT_HISTORY_FILE.exists():
+    with _chat_lock:
+        if not CHAT_HISTORY_FILE.exists():
+            return {"messages": []}
+        try:
+            data = json.loads(CHAT_HISTORY_FILE.read_text())
+            if isinstance(data, dict) and "messages" in data:
+                return data
+        except (ValueError, TypeError):  # bad JSON or bad encoding
+            pass
+        # keep the unreadable file: the next save would otherwise overwrite the whole history with one message
+        CHAT_HISTORY_FILE.replace(CHAT_HISTORY_FILE.with_name(f"chat-history.bad-{int(time.time())}.json"))
         return {"messages": []}
-    try:
-        data = json.loads(CHAT_HISTORY_FILE.read_text())
-        if isinstance(data, dict) and "messages" in data:
-            return data
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return {"messages": []}
 
 def save_chat_message(msg: dict):
-    history = load_chat_history()
-    history.setdefault("messages", []).append(msg)
-    if len(history["messages"]) > 200:
-        history["messages"] = history["messages"][-200:]
-    CHAT_HISTORY_FILE.write_text(json.dumps(history, indent=2))
+    with _chat_lock:
+        history = load_chat_history()
+        history.setdefault("messages", []).append(msg)
+        if len(history["messages"]) > 200:
+            history["messages"] = history["messages"][-200:]
+        write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
 
 def resolve_cli(name: str) -> str:
     # npm gives opencode a .cmd wrapper, which would pass the message through cmd.exe parsing; call the real exe.
@@ -1554,8 +1695,10 @@ def list_connections():
         return dict(pool.map(one, AGENTS))
 
 @app.post("/api/connections")
-def add_connection(req: ConnectionRequest):
+def add_connection(req: ConnectionRequest, request: Request):
     import shlex
+    if not is_loopback(request):  # registers a command every agent will run: only from the PC itself
+        raise HTTPException(403, "Connections can only be added on the PC itself")
     validate_identifier(req.name, r"^[a-zA-Z0-9_-]{1,40}$", "connection name")
     url, command = req.url.strip(), shlex.split(req.command.strip(), posix=False)
     if bool(url) == bool(command):
@@ -2340,6 +2483,9 @@ def get_diff(file: str = Query(""), ref: str = Query("HEAD")):
     try:
         if not file:
             raise HTTPException(400, "Query parameter 'file' is required")
+        # ref goes to git as an argument: ref=--output=<path> would write any file
+        if ref.startswith("-") or not re.fullmatch(r"[\w./~^-]+", ref):
+            raise HTTPException(400, "Invalid ref")
         # Prevent traversal — allow only repo-relative paths
         resolved = (BASE_DIR / file).resolve()
         if not str(resolved).startswith(str(BASE_DIR.resolve()) + os.sep) and resolved != BASE_DIR:
@@ -2347,7 +2493,7 @@ def get_diff(file: str = Query(""), ref: str = Query("HEAD")):
         if not resolved.exists():
             raise HTTPException(404, "File not found")
         rel = str(resolved.relative_to(BASE_DIR))
-        code, out, err = run_cli(["git", "-C", str(BASE_DIR), "diff", ref, "--", rel], timeout=10)
+        code, out, err = run_cli(["git", "-C", str(BASE_DIR), "diff", "--end-of-options", ref, "--", rel], timeout=10)
         if code == 0 and not out.strip():
             # no diff against ref — try working tree vs index
             return {"file": rel, "diff": "", "changed": False, "ref": ref}
