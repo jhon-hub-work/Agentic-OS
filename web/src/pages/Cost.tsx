@@ -38,10 +38,10 @@ export default function Cost() {
                   <BarChart data={byAgent} margin={{ left: -20 }}>
                     <defs>
                       <linearGradient id="chromeBar" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#5B6F86" /><stop offset="100%" stopColor="#0E1726" />
+                        <stop offset="0%" style={{ stopColor: 'var(--chart-a)' }} /><stop offset="100%" style={{ stopColor: 'var(--chart-b)' }} />
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="agent" tickLine={false} axisLine={false} tick={{ fill: '#4E6072', fontSize: 12 }} />
+                    <XAxis dataKey="agent" tickLine={false} axisLine={false} tick={{ fill: '#7C8B99', fontSize: 12 }} />
                     <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: '#7C8B99', fontSize: 12 }} />
                     <Tooltip cursor={{ fill: 'rgba(255,255,255,0.5)' }} contentStyle={{ borderRadius: 12, border: '1px solid #fff', background: 'rgba(255,255,255,0.9)' }} />
                     <Bar dataKey="calls" fill="url(#chromeBar)" radius={[8, 8, 4, 4]} maxBarSize={48} />

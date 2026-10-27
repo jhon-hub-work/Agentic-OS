@@ -26,7 +26,12 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
   mutedRef.current = muted
   const audioCtx = useRef<AudioContext | undefined>(undefined)
   const stopSpeech = useRef<() => void>(() => {})
-  const stopMic = useRef<() => void>(() => {})
+  const stopMic = useRef<(send?: boolean) => void>(() => {})
+  // hands-free: one tap starts a conversation; it sends when you go quiet and listens again after he answers
+  const [handsFree, setHandsFree] = useState(false)
+  const handsFreeRef = useRef(false)
+  const setConversation = (on: boolean) => { handsFreeRef.current = on; setHandsFree(on) }
+  const again = () => { if (handsFreeRef.current) setTimeout(() => { if (handsFreeRef.current) listen() }, 350) }
   const calm = useRef(0)
   const seen = useRef<Set<string> | null>(null)
   const ctx = () => (audioCtx.current ??= new AudioContext())
@@ -71,7 +76,7 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
   const settle = (ms = 4000) => { clearTimeout(calm.current); calm.current = window.setTimeout(() => { mood.current = 'normal' }, ms) }
 
   async function speak(reply: string) {
-    if (mutedRef.current) { settle(10000); return }
+    if (mutedRef.current) { settle(10000); again(); return }
     try {
       // VoiceStudio voice via the OS; the waves follow the real audio level
       const r = await fetch('/api/jharvis/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: reply }) })
@@ -86,16 +91,16 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
       const buf = new Uint8Array(an.fftSize)
       let raf = 0
       const loop = () => { energy.current = level(an, buf, 5); raf = requestAnimationFrame(loop) }
-      src.onended = () => { cancelAnimationFrame(raf); energy.current = 0; settle() }
+      src.onended = () => { cancelAnimationFrame(raf); energy.current = 0; settle(); again() }
       stopSpeech.current(); stopSpeech.current = () => { try { src.stop() } catch { /* already ended */ } }
       src.start(); loop()
     } catch {
-      if (!('speechSynthesis' in window)) { settle(); return }  // VoiceStudio off: fall back to the browser voice
+      if (!('speechSynthesis' in window)) { settle(); again(); return }  // VoiceStudio off: fall back to the browser voice
       const u = new SpeechSynthesisUtterance(reply.replace(/[*_`#>\[\]()]/g, '').slice(0, 600))
       let on = true
       const pump = () => { if (on) { energy.current = 0.35 + Math.random() * 0.5; setTimeout(pump, 110) } }
       u.onstart = pump
-      u.onend = u.onerror = () => { on = false; energy.current = 0; settle() }
+      u.onend = u.onerror = () => { on = false; energy.current = 0; settle(); again() }
       speechSynthesis.cancel()
       speechSynthesis.speak(u)
     }
@@ -108,11 +113,21 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
       const r = await fetch('/api/jharvis/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'owner', text: m.trim() }) })
       if (!r.ok) throw new Error(`Request failed (${r.status})`)
       seen.current?.add((await r.json() as Msg).id)
-    } catch (err) { setStatus('idle'); setError((err as Error).message) }
+    } catch (err) { setStatus('idle'); setError((err as Error).message); setConversation(false) }
   }
 
-  async function toggleMic() {
-    if (status === 'listening') { stopMic.current(); return }
+  // tap: start a conversation; tap again: send what was said (if anything) and end it
+  function toggleMic() {
+    if (handsFreeRef.current || status === 'listening') {
+      setConversation(false)
+      stopMic.current(true)
+      return
+    }
+    setConversation(true)
+    listen()
+  }
+
+  async function listen() {
     setError(null); stopSpeech.current(); speechSynthesis?.cancel()
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -124,30 +139,47 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
       srcNode.connect(an)
       const buf = new Uint8Array(an.fftSize)
       let raf = 0
-      const loop = () => { energy.current = level(an, buf, 6); raf = requestAnimationFrame(loop) }
+      // voice detection: once you've spoken, ~1.1 s of quiet sends it; 8 s of nothing ends the conversation
+      const began = performance.now()
+      let heard = false, quietSince = 0
+      const loop = () => {
+        const lvl = level(an, buf, 6), now = performance.now()
+        energy.current = lvl
+        if (lvl > 0.18) { heard = true; quietSince = 0 }
+        else if (heard && lvl < 0.1) quietSince ||= now
+        if (heard && quietSince && now - quietSince > 1100) return stopMic.current(true)
+        if (heard && now - began > 30000) return stopMic.current(true)
+        if (!heard && now - began > 8000) { setConversation(false); return stopMic.current(false) }
+        raf = requestAnimationFrame(loop)
+      }
       loop()
       const rec = new MediaRecorder(stream)
       const chunks: Blob[] = []
+      let keep = true
       rec.ondataavailable = e => chunks.push(e.data)
       rec.onstop = async () => {
+        if (!keep || !heard) { setStatus('idle'); return }
         setStatus('transcribing')
         try {
           const form = new FormData()
           form.append('file', new Blob(chunks, { type: rec.mimeType }), 'talk.webm')
           const r = await fetch('/api/jharvis/transcribe', { method: 'POST', body: form })
-          if (!r.ok) throw new Error('I couldn’t hear that. Is VoiceStudio running?')
+          if (!r.ok) throw new Error('I couldn’t hear that. Try again in a moment.')
           const { text: said } = await r.json() as { text: string }
           if (said) send(said)
-          else { setStatus('idle'); setError('I didn’t catch anything. Try again.') }
-        } catch (err) { setStatus('idle'); setError((err as Error).message) }
+          else if (handsFreeRef.current) listen()  // only noise: keep listening
+          else setStatus('idle')
+        } catch (err) { setStatus('idle'); setError((err as Error).message); setConversation(false) }
       }
       rec.start()
-      stopMic.current = () => {
+      stopMic.current = (send = false) => {
+        keep = send
         cancelAnimationFrame(raf); srcNode.disconnect(); rec.stop(); stream.getTracks().forEach(t => t.stop())
         energy.current = 0; stopMic.current = () => {}
       }
       setStatus('listening')
     } catch {
+      setConversation(false)
       setError(window.isSecureContext ? 'Microphone blocked. Allow it in the browser.' : 'The mic only works on the PC (localhost) or over https.')
     }
   }
@@ -160,13 +192,13 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
   }
 
   const roundBtn = 'flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-white/70 bg-white/40 text-ink-2 backdrop-blur-md transition-colors hover:bg-white/70 hover:text-ink'
-  const line = status === 'listening' ? 'Listening…' : status === 'transcribing' ? 'Got it…' : status === 'thinking' ? `“${subtitle}”` : subtitle.replace(/[*_`#>]|^\s*- /gm, '')
+  const line = status === 'listening' ? 'Listening… just talk, I’ll answer when you pause.' : status === 'transcribing' ? 'Got it…' : status === 'thinking' ? `“${subtitle}”` : subtitle.replace(/[*_`#>]|^\s*- /gm, '')
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-4 px-4">
       <AnimatePresence mode="wait">
         <motion.p key={line} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={spring}
-          aria-live="polite" title={subtitle} className="line-clamp-3 text-center text-[17px] leading-relaxed text-ink [text-shadow:0_1px_12px_rgba(240,246,250,0.9)]">
+          aria-live="polite" title={subtitle} className="line-clamp-3 text-center text-[17px] leading-relaxed text-ink [text-shadow:0_1px_12px_var(--color-ice)]">
           {line || 'Tap the mic and talk to me.'}
         </motion.p>
       </AnimatePresence>
@@ -180,9 +212,11 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
       )}
       <div className="flex items-center gap-3">
         <button onClick={() => setTyping(t => !t)} aria-pressed={typing} aria-label="Type instead" className={roundBtn}><Keyboard size={18} /></button>
-        <button onClick={toggleMic} aria-pressed={status === 'listening'} aria-label={status === 'listening' ? 'Stop and send' : 'Talk'}
-          className={`flex h-16 w-16 cursor-pointer items-center justify-center rounded-full border transition-transform active:scale-95 ${status === 'listening' ? 'chrome border-transparent' : 'border-white/80 bg-white/50 text-ink backdrop-blur-md hover:bg-white/80'}`}>
-          {status === 'listening' ? <Stop size={22} weight="fill" /> : <Microphone size={24} />}
+        <button onClick={toggleMic} aria-pressed={handsFree} aria-label={handsFree ? 'End the conversation' : 'Talk'}
+          title={handsFree ? 'Talking hands-free. Tap to end.' : 'Tap once, then just talk'}
+          className={`relative flex h-16 w-16 cursor-pointer items-center justify-center rounded-full border transition-transform active:scale-95 ${handsFree ? 'chrome border-transparent' : 'border-white/80 bg-white/50 text-ink backdrop-blur-md hover:bg-white/80'}`}>
+          {status === 'listening' && <span className="absolute inset-0 animate-ping rounded-full border-2 border-[#3FB6EC]/60" aria-hidden="true" />}
+          {handsFree ? <Stop size={22} weight="fill" /> : <Microphone size={24} />}
         </button>
         <button onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'Unmute Jharvis' : 'Mute Jharvis'} className={roundBtn}>
           {muted ? <SpeakerSlash size={18} /> : <SpeakerHigh size={18} />}

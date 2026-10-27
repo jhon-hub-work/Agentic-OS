@@ -19,6 +19,26 @@
   --ease-glide: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
+/* Night Glacier: same token names, so every page follows. "white" becomes the dark glass tone, so bg-white/60
+   cards turn into dark glass and the selected chips (bg-navy text-white) become light-blue with dark text. */
+:root.dark {
+  color-scheme: dark;
+  --color-ice: #0A111C;
+  --color-ink: #E4ECF4;
+  --color-ink-2: #A9B8C8;
+  --color-ink-3: #74869A;
+  --color-navy: #9FDDF7;
+  --color-navy-deep: #E4ECF4;
+  --color-steel: #8FA6BF;
+  --color-ok: #4CC38A;
+  --color-warn: #E0A458;
+  --color-bad: #F07A7A;
+  --color-white: #22344B;
+  --chart-a: #9FDDF7;
+  --chart-b: #3FB6EC;
+}
+:root { --chart-a: #5B6F86; --chart-b: #0E1726; }
+
 html { background: var(--color-ice); color: var(--color-ink); }
 body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antialiased; }
 ::selection { background: rgba(31, 45, 68, 0.15); }
@@ -100,6 +120,53 @@ body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antiali
   animation: shimmer 1.6s linear infinite;
 }
 @keyframes shimmer { to { background-position: -200% 0; } }
+
+/* night versions of the Glacier surfaces */
+:root.dark ::selection { background: rgba(159, 221, 247, 0.25); }
+:root.dark .frost-mesh {
+  background:
+    radial-gradient(60% 50% at 8% 0%, #16233A 0%, transparent 70%),
+    radial-gradient(55% 60% at 100% 100%, #0E2A3D 0%, transparent 70%),
+    radial-gradient(40% 40% at 70% 20%, #121E30 0%, transparent 70%),
+    var(--color-ice);
+}
+:root.dark .glass-shell { background: rgba(255, 255, 255, 0.03); border-color: rgba(255, 255, 255, 0.09); box-shadow: 0 24px 48px -28px rgba(0, 0, 0, 0.6); }
+:root.dark .glass { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.11); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06); }
+:root.dark .glass-bar { background: rgba(14, 23, 38, 0.62); border-color: rgba(255, 255, 255, 0.08); }
+:root.dark .glass-bar.sheet { background: rgba(14, 23, 38, 0.95); }
+:root.dark .liquid-glass {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0) 55%, rgba(159, 221, 247, 0.05));
+  border-color: rgba(255, 255, 255, 0.22);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), inset 0 0 24px rgba(159, 221, 247, 0.06), 0 24px 50px -24px rgba(0, 0, 0, 0.6);
+}
+:root.dark .liquid-glass::before { background: radial-gradient(120% 60% at 20% -10%, rgba(255, 255, 255, 0.16), transparent 55%); }
+:root.dark .chrome {
+  background: linear-gradient(120deg, #3FB6EC 0%, #2C7FB0 55%, #1F4E78 100%);
+  color: #F4FAFF;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 10px 24px -12px rgba(63, 182, 236, 0.45);
+}
+:root.dark .chrome-text { background: linear-gradient(120deg, #9FDDF7, #3FB6EC 60%); -webkit-background-clip: text; background-clip: text; }
+:root.dark .prose-glacier code { background: rgba(255, 255, 255, 0.08); }
+:root.dark .prose-glacier pre { background: #050A12; }
+:root.dark .prose-glacier th, :root.dark .prose-glacier td { border-bottom-color: rgba(255, 255, 255, 0.08); }
+:root.dark .shimmer { background-image: linear-gradient(90deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.03) 100%); }
+/* the theme switch: a black hole in light mode, a captured star in dark mode */
+.black-hole { width: 44px; height: 44px; border: 0; border-radius: 50%; cursor: pointer; background: none; padding: 0; }
+.black-hole:focus-visible { outline: 2px solid #3FB6EC; outline-offset: 4px; }
+.black-hole .bh-core { position: absolute; inset: 11px; border-radius: 50%; background: #000; box-shadow: 0 0 0 2px rgba(255,255,255,.08), 0 0 16px 3px rgba(0,0,0,.35); transition: background .5s, box-shadow .5s; }
+.black-hole .bh-disk { position: absolute; inset: 1px; border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 10%, #F6B26B 18%, #FFE8C2 26%, transparent 38%, #7FD3F7 58%, transparent 70%, #F6B26B 86%, transparent);
+  -webkit-mask: radial-gradient(circle, transparent 46%, #000 48%, #000 62%, transparent 72%);
+          mask: radial-gradient(circle, transparent 46%, #000 48%, #000 62%, transparent 72%);
+  animation: bh-spin 6s linear infinite; filter: blur(.6px); opacity: .9; }
+.black-hole.bh-busy .bh-disk { animation-duration: .45s; }
+:root.dark .black-hole .bh-core { background: radial-gradient(circle, #FFFBEA, #FFD27A 45%, #F59E0B 70%); box-shadow: 0 0 22px 7px rgba(255,210,122,.5); }
+:root.dark .black-hole .bh-disk { opacity: .35; }
+@keyframes bh-spin { to { transform: rotate(360deg); } }
+::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+
+/* the theme switch's warp acts on the live page (SVG filters don't apply to view-transition snapshots) */
+body.sucking { filter: var(--suck, none); }
 
 @media (prefers-reduced-motion: reduce) {
   .shimmer { animation: none; }

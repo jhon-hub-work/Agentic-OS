@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Black-hole theme switch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  /* Glacier light (the OS today) and its dark twin */
+  :root {
+    --bg: #E6EEF4; --mesh-a: #FFFFFF; --mesh-b: #CFE3F2;
+    --ink: #1D2B3A; --ink-2: #4E6072; --ink-3: #7C8B99;
+    --glass: rgba(255,255,255,.55); --glass-edge: rgba(255,255,255,.95);
+    --dot: #3FB6EC; --chrome-a: #5B6F86; --chrome-b: #0E1726;
+  }
+  :root.dark {
+    --bg: #0A111C; --mesh-a: #16233A; --mesh-b: #0E2A3D;
+    --ink: #E4ECF4; --ink-2: #9FB0C2; --ink-3: #6B7C8E;
+    --glass: rgba(255,255,255,.05); --glass-edge: rgba(255,255,255,.12);
+    --dot: #4FC3F7; --chrome-a: #9FDDF7; --chrome-b: #3FB6EC;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); color: var(--ink); font-family: Geist, system-ui, sans-serif; }
+  body { margin: 0; min-height: 100dvh;
+    background: radial-gradient(60% 50% at 8% 0%, var(--mesh-a), transparent 70%),
+                radial-gradient(55% 60% at 100% 100%, var(--mesh-b), transparent 70%), var(--bg); }
+  .shell { display: grid; grid-template-columns: 220px 1fr; gap: 24px; padding: 24px; max-width: 1200px; margin: 0 auto; }
+  @media (max-width: 760px) { .shell { grid-template-columns: 1fr; padding: 16px; } .rail { display: none; } }
+  .card { background: var(--glass); border: 1px solid var(--glass-edge); border-radius: 24px; padding: 20px; backdrop-filter: blur(18px); }
+  .rail { display: flex; flex-direction: column; gap: 6px; }
+  .rail a { padding: 10px 12px; border-radius: 14px; color: var(--ink-2); text-decoration: none; font-size: 14px; }
+  .rail a.on { background: var(--glass); color: var(--ink); border: 1px solid var(--glass-edge); }
+  h1 { font-size: 44px; font-weight: 500; letter-spacing: -.02em; margin: 8px 0 4px; }
+  p { color: var(--ink-2); line-height: 1.6; margin: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 20px; }
+  .num { font-size: 32px; font-weight: 500; margin-top: 6px; }
+  .label { font-size: 13px; color: var(--ink-3); }
+  canvas { width: 100%; height: 220px; display: block; margin-top: 16px; }
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+
+  /* the switch: a black hole in light mode, a captured star in dark mode */
+  .hole { position: relative; width: 56px; height: 56px; border: 0; border-radius: 50%; cursor: pointer; background: none; padding: 0; flex: none; }
+  .hole:focus-visible { outline: 2px solid var(--dot); outline-offset: 4px; }
+  .hole .core { position: absolute; inset: 14px; border-radius: 50%; background: #000; box-shadow: 0 0 0 2px rgba(255,255,255,.08), 0 0 18px 4px rgba(0,0,0,.35); transition: background .5s, box-shadow .5s; }
+  .hole .disk { position: absolute; inset: 2px; border-radius: 50%;
+    background: conic-gradient(from 0deg, transparent 0 10%, #F6B26B 18%, #FFE8C2 26%, transparent 38%, #7FD3F7 58%, transparent 70%, #F6B26B 86%, transparent);
+    -webkit-mask: radial-gradient(circle, transparent 46%, #000 48%, #000 62%, transparent 72%);
+            mask: radial-gradient(circle, transparent 46%, #000 48%, #000 62%, transparent 72%);
+    animation: spin 6s linear infinite; filter: blur(.6px); opacity: .9; }
+  .hole.busy .disk { animation-duration: .45s; }
+  :root.dark .hole .core { background: radial-gradient(circle, #FFFBEA, #FFD27A 45%, #F59E0B 70%); box-shadow: 0 0 24px 8px rgba(255,210,122,.55); }
+  :root.dark .hole .disk { opacity: .35; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* the swap is drawn by the View Transition; the default cross-fade is switched off */
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+  :root.pulling::view-transition-old(root) { z-index: 2; }  /* the light page stays on top while it is pulled in */
+  /* the light page is pulled toward the hole by a warp field (SVG filter) */
+  body.sucking { filter: var(--suck, none); }  /* SVG filters work on the live page, not on view-transition snapshots */
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+</svg>
+<div class="shell">
+  <nav class="rail card" aria-label="Main">
+    <a class="on" href="#">Jharvis</a><a href="#">Jobs</a><a href="#">Chats</a><a href="#">Sessions</a><a href="#">Schedules</a><a href="#">Skills</a>
+  </nav>
+  <main>
+    <div class="top">
+      <div>
+        <p class="label">Agentic OS · theme demo</p>
+        <h1>Afternoon, Jhon.</h1>
+        <p>Click the black hole. It pulls the light in; click again and it spits it back out.</p>
+      </div>
+      <button class="hole" id="hole" aria-label="Switch to dark mode"><span class="disk"></span><span class="core"></span></button>
+    </div>
+    <div class="card" style="margin-top:20px"><canvas id="waves" aria-hidden="true"></canvas></div>
+    <div class="grid">
+      <div class="card"><div class="label">Jobs to approve</div><div class="num">4</div></div>
+      <div class="card"><div class="label">Agents online</div><div class="num">4 / 4</div></div>
+      <div class="card"><div class="label">Next job search</div><div class="num">14:00</div></div>
+    </div>
+  </main>
+</div>
+<script>
+  const root = document.documentElement, hole = document.getElementById('hole')
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)')
+  const ease = 'cubic-bezier(.7,0,.84,0)', out = 'cubic-bezier(.16,1,.3,1)'
+
+  function setTheme(dark) {
+    root.classList.toggle('dark', dark)
+    hole.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode')
+  }
+
+  // pull field: each pixel samples the page further from the hole, so everything streams in.
+  // Stronger near the hole, with a slight swirl. Built once per switch at quarter size (smooth anyway).
+  // The browser doesn't redraw a snapshot when a filter's numbers change, so there are STEPS ready-made
+  // strengths and each frame switches which one the snapshot uses.
+  const STEPS = 32, svg = document.querySelector('svg[aria-hidden]')
+  function buildField(hx, hy) {
+    const W = innerWidth, H = innerHeight, k = 4, w = Math.ceil(W / k), h = Math.ceil(H / k)
+    const cv = document.createElement('canvas'); cv.width = w; cv.height = h
+    const g = cv.getContext('2d'), img = g.createImageData(w, h), far = Math.hypot(Math.max(hx, W - hx), Math.max(hy, H - hy))
+    const swirl = 0.45, cs = Math.cos(swirl), sn = Math.sin(swirl), FOLDS = 14
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const dx = x * k - hx, dy = y * k - hy, d = Math.hypot(dx, dy) || 1
+      const f = Math.pow(1 - Math.min(1, d / far), 1.6) * 0.9 + 0.1          // pull strength
+      const ux = (dx * cs - dy * sn) / d, uy = (dx * sn + dy * cs) / d        // away from the hole, twisted a bit
+      // cloth folds: ridges that run into the hole and curve on the way (like the sketch), the page gathering into them
+      const fold = Math.sin(Math.atan2(dy, dx) * FOLDS + d / far * 5)
+      const gather = 0.35 * fold * Math.min(1, f * 1.6)                       // sideways pull into the folds
+      const vx = ux * f - uy * gather, vy = uy * f + ux * gather
+      const i = (y * w + x) * 4
+      img.data[i] = 128 + Math.max(-1, Math.min(1, vx)) * 127; img.data[i + 1] = 128 + Math.max(-1, Math.min(1, vy)) * 127
+      img.data[i + 2] = 128 + fold * Math.min(1, f * 1.6) * 127; img.data[i + 3] = 255  // blue = fold height, for shading
+    }
+    g.putImageData(img, 0, 0)
+    const url = cv.toDataURL(), pull = Math.max(W, H) * 1.3
+    svg.innerHTML = Array.from({ length: STEPS }, (_, k) =>
+      `<filter id="suck${k}" filterUnits="userSpaceOnUse" primitiveUnits="userSpaceOnUse" x="0" y="0" width="${W}" height="${H}" color-interpolation-filters="sRGB">` +
+      `<feImage href="${url}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="none" result="f"/>` +
+      `<feDisplacementMap in="SourceGraphic" in2="f" scale="${(pull * (k / (STEPS - 1)) ** 1.3).toFixed(1)}" xChannelSelector="R" yChannelSelector="G" result="bent"/>` +
+      // light and shadow along the folds so they read as fabric, getting deeper as the pull grows
+      `<feColorMatrix in="f" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 1 0 0" result="h"/>` +
+      `<feDisplacementMap in="h" in2="f" scale="${(pull * (k / (STEPS - 1)) ** 1.3).toFixed(1)}" xChannelSelector="R" yChannelSelector="G" result="hb"/>` +
+      `<feDiffuseLighting in="hb" surfaceScale="${(9 * k / (STEPS - 1)).toFixed(2)}" lighting-color="#fff" result="shade"><feDistantLight azimuth="235" elevation="38"/></feDiffuseLighting>` +
+      `<feComposite in="bent" in2="shade" operator="arithmetic" k1="${(1.6 * k / (STEPS - 1)).toFixed(3)}" k2="${(1 - k / (STEPS - 1)).toFixed(3)}" k3="0" k4="0" result="lit"/>` +
+      `<feComposite in="lit" in2="bent" operator="in"/></filter>`).join('')
+    return far
+  }
+
+  // the moment the hole eats (or is about to spit): a bright flare and a ring wave across the page
+  function swallowFx() {
+    const r = hole.getBoundingClientRect(), ring = document.createElement('div')
+    ring.style.cssText = `position:fixed;left:${r.left + r.width / 2 - 20}px;top:${r.top + r.height / 2 - 20}px;width:40px;height:40px;border-radius:50%;pointer-events:none;z-index:10;border:2px solid rgba(159,221,247,.9);box-shadow:0 0 24px rgba(159,221,247,.6), inset 0 0 18px rgba(255,230,180,.5)`
+    document.body.append(ring)
+    ring.animate([{ transform: 'scale(.3)', opacity: 1 }, { transform: `scale(${Math.hypot(innerWidth, innerHeight) / 30})`, opacity: 0 }],
+      { duration: 900, easing: 'cubic-bezier(.16,1,.3,1)' }).finished.then(() => ring.remove())
+    hole.querySelector('.core').animate([{ boxShadow: '0 0 0 0 rgba(255,236,190,0)' }, { boxShadow: '0 0 46px 22px rgba(255,236,190,.95)', offset: .25 }, { boxShadow: '0 0 0 0 rgba(255,236,190,0)' }],
+      { duration: 650, easing: 'ease-out' })
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms))
+  hole.addEventListener('click', async () => {
+    if (hole.classList.contains('busy')) return
+    const dark = !root.classList.contains('dark')
+    if (!document.startViewTransition || reduce.matches) { setTheme(dark); return }
+    hole.classList.add('busy')
+    const body = document.body, r = hole.getBoundingClientRect(), hx = r.left + r.width / 2, hy = r.top + r.height / 2
+    const far = buildField(hx, hy), at = `${hx}px ${hy}px`
+    // bend toward the hole -> stretch into a funnel -> slip in (light mode plays it backwards)
+    const frames = [
+      { transform: 'scale(1)', clipPath: `circle(${far}px at ${at})`, opacity: 1, transformOrigin: at, easing: 'linear' },
+      { transform: 'scale(.92)', clipPath: `circle(${far}px at ${at})`, opacity: 1, transformOrigin: at, offset: .35, easing: 'linear' },
+      { transform: 'scale(.45)', clipPath: `circle(${far * .45}px at ${at})`, opacity: 1, transformOrigin: at, offset: .8, easing: 'linear' },
+      { transform: 'scale(0)', clipPath: `circle(0px at ${at})`, opacity: .6, transformOrigin: at },
+    ]
+    // warp strength 0..1 over the film: gentle bend, then the funnel, then all of it
+    const warp = p => p * p * (3 - 2 * p)  // smoothstep: eases in and out of full suction
+    const use = w => root.style.setProperty('--suck', w > 0 ? `url(#suck${Math.round(w * (STEPS - 1))})` : 'none')
+    const follow = (anim, dur, dir) => new Promise(done => {
+      const tick = () => {
+        const p = Math.min(1, anim.effect.getComputedTiming().progress ?? 1)
+        use(warp(dir ? p : 1 - p))
+        p < 1 ? requestAnimationFrame(tick) : done()
+      }
+      requestAnimationFrame(tick)
+    })
+
+    if (dark) {
+      // the real light page is vacuumed into the hole over darkness...
+      const dur = 900
+      root.style.background = '#0A111C'
+      body.classList.add('sucking')
+      const anim = body.animate(frames, { duration: dur, fill: 'forwards', easing: 'cubic-bezier(.55,.05,.85,.35)' })
+      hole.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.2)', offset: .5 }, { transform: 'scale(1.45)', offset: .9 }, { transform: 'scale(1)' }], { duration: dur, easing: 'ease-in-out' })
+      setTimeout(swallowFx, dur * .88)
+      await follow(anim, dur, true)
+      // ...then the dark interface opens out of the hole
+      const t = document.startViewTransition(() => { anim.cancel(); body.classList.remove('sucking'); use(0); root.style.background = ''; setTheme(true) })
+      await t.ready
+      root.animate([{ clipPath: `circle(0px at ${at})` }, { clipPath: `circle(${far}px at ${at})` }],
+        { duration: 320, easing: 'cubic-bezier(.16,1,.3,1)', pseudoElement: '::view-transition-new(root)' })
+      await t.finished
+    } else {
+      // the hole gathers itself, then blows the light page back out, unbending as it spreads
+      swallowFx(); await sleep(140)
+      const dur = 850
+      // warp only the new light page: switched on inside the update, after the dark page was captured
+      const t = document.startViewTransition(() => { use(1); body.classList.add('sucking'); setTheme(false) })
+      await t.ready
+      const back = frames.slice().reverse().map((f, i, a) => ({ ...f, offset: i === 0 ? 0 : i === a.length - 1 ? 1 : 1 - frames[a.length - 1 - i].offset, easing: 'linear' }))
+      const anim = root.animate(back, { duration: dur, fill: 'forwards', easing: 'cubic-bezier(.15,.65,.45,1)', pseudoElement: '::view-transition-new(root)' })
+      hole.animate([{ transform: 'scale(1.4)' }, { transform: 'scale(.9)', offset: .2 }, { transform: 'scale(1)' }], { duration: dur, easing: 'ease-in-out' })
+      await follow(anim, dur, false)
+      await t.finished
+      anim.cancel(); body.classList.remove('sucking'); use(0)
+    }
+    hole.classList.remove('busy')
+  })
+
+  // a few rows of dots so the swirl has something to pull on
+  const c = document.getElementById('waves'), g = c.getContext('2d')
+  function draw(ms) {
+    const w = c.width = c.clientWidth * devicePixelRatio, h = c.height = c.clientHeight * devicePixelRatio, t = ms / 1000
+    g.fillStyle = getComputedStyle(root).getPropertyValue('--dot')
+    for (let row = 0; row < 9; row++) for (let i = 0; i < 70; i++) {
+      const x = i / 69 * w, y = h * (.2 + row * .08) + Math.sin(i * .25 + t + row * .5) * h * .08
+      g.globalAlpha = .25 + row * .08
+      g.beginPath(); g.arc(x, y, (1.2 + row * .25) * devicePixelRatio, 0, 7); g.fill()
+    }
+    if (!reduce.matches) requestAnimationFrame(draw)
+  }
+  requestAnimationFrame(draw)
+</script>
+</body>
+</html>

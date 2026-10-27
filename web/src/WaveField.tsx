@@ -19,25 +19,29 @@ function WaveField({ pulse = 0, energy, mood, className = '' }: { pulse?: number
     camera.lookAt(0, -0.4, 0)
 
     const COLS = 140, ROWS = 64, W = 30, D = 13, n = COLS * ROWS
-    const pos = new Float32Array(n * 3), col = new Float32Array(n * 3)
-    // three palettes (edge, middle, edge): blue = normal, green = good news, red = urgent
-    const palettes = [['#5B6F86', '#3FB6EC', '#1F2D44'], ['#4E7A64', '#34C77B', '#17503A'], ['#86545B', '#EC4F57', '#5A1622']]
+    const pos = new Float32Array(n * 3), col = new Float32Array(n * 4)  // rgba: alpha fades the edges
+    // palettes (edge, middle, edge): blue = normal, green = good news, red = urgent; then the same three for dark mode
+    const palettes = [['#5B6F86', '#3FB6EC', '#1F2D44'], ['#4E7A64', '#34C77B', '#17503A'], ['#86545B', '#EC4F57', '#5A1622'],
+      ['#5E7EA0', '#4FC3F7', '#9FDDF7'], ['#5E9C80', '#4CD98F', '#A8F0C8'], ['#A0606A', '#FF6B72', '#FFB3B7']]
+    const target = () => (mood?.current === 'good' ? 1 : mood?.current === 'urgent' ? 2 : 0) + (document.documentElement.classList.contains('dark') ? 3 : 0)
     const cols = palettes.map(() => new Float32Array(n * 3)), tmp = new THREE.Color()
     for (let r = 0, i = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++, i++) {
       pos[i * 3] = (c / (COLS - 1) - 0.5) * W
       pos[i * 3 + 2] = (r / (ROWS - 1) - 0.5) * D
-      const u = c / (COLS - 1)
+      const u = c / (COLS - 1), v = r / (ROWS - 1)
+      // soft edges baked into each dot (a CSS mask over the canvas cost a repaint every frame)
+      col[i * 4 + 3] = THREE.MathUtils.smoothstep(Math.min(u, 1 - u), 0, 0.3) * THREE.MathUtils.smoothstep(Math.min(v, 1 - v), 0, 0.22)
       palettes.forEach(([a, b, d], k) => {
         tmp.set(u < 0.5 ? a : b).lerp(new THREE.Color(u < 0.5 ? b : d), u < 0.5 ? u * 2 : (u - 0.5) * 2)
         cols[k].set([tmp.r, tmp.g, tmp.b], i * 3)
       })
     }
-    const start = mood?.current === 'good' ? 1 : mood?.current === 'urgent' ? 2 : 0
-    col.set(cols[start])
-    const mix = [0, 1, 2].map(k => k === start ? 1 : 0)
+    const start = target()
+    for (let i = 0; i < n; i++) for (let ch = 0; ch < 3; ch++) col[i * 4 + ch] = cols[start][i * 3 + ch]
+    const mix = palettes.map((_, k) => k === start ? 1 : 0)
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 4))
     // soft round sprite so points read as glowing dots, not squares
     const sprite = document.createElement('canvas')
     sprite.width = sprite.height = 64
@@ -56,7 +60,7 @@ function WaveField({ pulse = 0, energy, mood, className = '' }: { pulse?: number
     const size = () => {
       const w = canvas.clientWidth, h = canvas.clientHeight
       if (!w || !h) return
-      renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5))  // full-screen canvas: 2x stuttered
       renderer.setSize(w, h, false)
       camera.aspect = w / h
       camera.updateProjectionMatrix()
@@ -78,14 +82,19 @@ function WaveField({ pulse = 0, energy, mood, className = '' }: { pulse?: number
       }
       geo.attributes.position.needsUpdate = true
       // ease toward the mood's palette (about a second)
-      const want = mood?.current === 'good' ? 1 : mood?.current === 'urgent' ? 2 : 0
+      const want = target()
       let moved = false
-      for (let k = 0; k < 3; k++) {
+      for (let k = 0; k < palettes.length; k++) {
         const d = (k === want ? 1 : 0) - mix[k]
         if (Math.abs(d) > 0.002) { mix[k] += d * 0.05; moved = true }
       }
       if (moved) {
-        for (let j = 0; j < n * 3; j++) col[j] = cols[0][j] * mix[0] + cols[1][j] * mix[1] + cols[2][j] * mix[2]
+        for (let i = 0; i < n; i++) for (let ch = 0; ch < 3; ch++) {
+          const j = i * 3 + ch
+          let v = 0
+          for (let k = 0; k < cols.length; k++) if (mix[k]) v += cols[k][j] * mix[k]
+          col[i * 4 + ch] = v
+        }
         geo.attributes.color.needsUpdate = true
       }
       points.rotation.y = mouse.x * 0.25

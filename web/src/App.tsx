@@ -12,6 +12,8 @@ import Cost from './pages/Cost'
 import Overview from './pages/Overview'
 import Skills from './pages/Skills'
 import Team from './pages/Team'
+import ThemeSwitch from './ThemeSwitch'
+import TitleBar, { inApp } from './TitleBar'
 import { spring } from './ui'
 
 const NAV: { id: string; label: string; icon: Icon }[] = [
@@ -46,6 +48,9 @@ export default function App() {
   return (
     <div className="min-h-[100dvh]">
       <div className="frost-mesh" aria-hidden="true" />
+      <TitleBar />
+      {/* in the desktop app the window buttons sit in the top-right corner, so the hole moves down */}
+      <ThemeSwitch className={`fixed right-4 z-30 ${inApp ? 'top-11' : 'top-4'}`} />
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-white focus:px-4 focus:py-2">Skip to content</a>
 
       {/* Desktop: floating glass rail */}

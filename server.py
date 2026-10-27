@@ -655,13 +655,29 @@ def jharvis_panel_close(pid: str):
         JHARVIS_PANELS.write_text(json.dumps(panels, indent=2))
     return {"status": "closed"}
 
+STT_PYTHON = os.environ.get("JHARVIS_PYTHON", "C:/Users/Admin-PC/Documents/Jharvis/.venv/Scripts/python.exe")
+
 @app.post("/api/jharvis/transcribe")
 async def jharvis_transcribe(file: UploadFile = File(...)):
-    """The dashboard mic: speech -> text via VoiceStudio (works in Brave, which has no browser speech recognition)."""
+    """The dashboard mic: speech -> text. First Jharvis's offline model (about 2 s, same one as his wake word),
+    then VoiceStudio if that fails (VoiceStudio took 24 s while busy speaking, and its engine restarts now and then)."""
+    import tempfile
     import urllib.request
     audio = await file.read()
     if not audio or len(audio) > 25 * 1024 * 1024:
         raise HTTPException(400, "empty or too long recording")
+    with tempfile.NamedTemporaryFile(suffix=Path(file.filename or "talk.webm").suffix, delete=False) as f:
+        f.write(audio)
+    try:
+        out = await asyncio.to_thread(subprocess.run, [STT_PYTHON, str(BASE_DIR / "stt_fallback.py"), f.name],
+                                      capture_output=True, text=True, timeout=60)
+        if out.returncode == 0:
+            return {"text": out.stdout.strip()}
+        print(f"[transcribe] offline model failed: {out.stderr.strip()[-300:]}")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        print(f"[transcribe] offline model failed ({e})")
+    finally:
+        os.unlink(f.name)
     boundary = uuid.uuid4().hex
     body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n"
             f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file.filename or 'talk.webm'}\"\r\n"
@@ -669,9 +685,9 @@ async def jharvis_transcribe(file: UploadFile = File(...)):
     url = os.environ.get("VOICESTUDIO_URL", "http://127.0.0.1:3900") + "/v1/audio/transcriptions"
     req = urllib.request.Request(url, body, {"Content-Type": f"multipart/form-data; boundary={boundary}"})
     try:
-        r = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=120).read())
+        r = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=60).read())
     except OSError as e:
-        raise HTTPException(503, f"VoiceStudio not answering ({e})")
+        raise HTTPException(503, f"Speech to text failed offline and in VoiceStudio ({e})")
     return {"text": json.loads(r).get("text", "").strip()}
 
 @app.get("/api/jharvis/messages")
@@ -1361,7 +1377,12 @@ def chat(req: ChatRequest):
     context = "\n\n".join(f"[{owner.NAME if m['role'] == 'user' else agent}]\n{m['content']}" for m in recent)
     prompt = f"Earlier in this chat:\n{context}\n\n{owner.NAME} now says:\n{message}" if context else message
 
-    response_text = execute_agent(agent, prompt)
+    # "/skill-name details" runs that skill with this agent (like slash commands)
+    slash = re.fullmatch(r"/([a-zA-Z0-9_-]+)\s*(.*)", message, re.S)
+    if slash and (BASE_DIR / "skills" / slash[1] / "SKILL.md").exists():
+        response_text = run_skill(slash[1], SkillRunRequest(input=slash[2], agent=agent))["output"]
+    else:
+        response_text = execute_agent(agent, prompt)
 
     agent_msg = {
         "id": str(uuid.uuid4())[:8],

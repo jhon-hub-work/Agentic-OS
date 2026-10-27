@@ -67,7 +67,7 @@ export function StatusDot({ on }: { on: boolean }) {
 /** Official mark of each agent (web/public/agents). */
 export function AgentLogo({ name, size = 28 }: { name: string; size?: number }) {
   return (
-    <span className="flex shrink-0 items-center justify-center rounded-[30%] border border-white bg-white shadow-[0_4px_12px_-6px_rgba(29,43,58,0.35)]"
+    <span className="flex shrink-0 items-center justify-center rounded-[30%] border border-white bg-[#FFFFFF] shadow-[0_4px_12px_-6px_rgba(29,43,58,0.35)]"
       style={{ width: size, height: size }}>
       <img src={`/agents/${name}.svg`} alt="" className="h-[68%] w-[68%] object-contain" />
     </span>

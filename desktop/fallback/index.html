@@ -1,8 +1,23 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Agentic OS</title>
 <style>body{margin:0;min-height:100dvh;display:grid;place-items:center;background:#E6EEF4;color:#1D2B3A;font-family:system-ui,sans-serif}
-main{text-align:center;max-width:42ch;padding:24px}code{background:#fff;padding:2px 6px;border-radius:6px}a{color:#1F2D44}</style></head>
-<body><main><h1 style="font-weight:500">Agentic OS isn't running</h1>
+main{text-align:center;max-width:42ch;padding:24px}code{background:#fff;padding:2px 6px;border-radius:6px}a{color:#1F2D44}
+/* the window has no title bar: drag strip + window buttons (same as the dashboard's) */
+.drag{position:fixed;inset:0 0 auto 0;height:32px}
+.ctl{position:fixed;top:0;right:0;display:flex}
+.ctl button{width:44px;height:32px;border:0;background:none;color:#4E6072;font:14px system-ui;cursor:pointer}
+.ctl button:hover{background:rgba(255,255,255,.6);color:#1D2B3A}.ctl button.x:hover{background:#C42B1C;color:#fff}</style></head>
+<body>
+<div class="drag" data-tauri-drag-region></div>
+<div class="ctl">
+  <button aria-label="Minimize" onclick="win.minimize()">&#8211;</button>
+  <button aria-label="Maximize" onclick="win.toggleMaximize()">&#9633;</button>
+  <button aria-label="Close" class="x" onclick="win.close()">&#10005;</button>
+</div>
+<main><h1 style="font-weight:500">Agentic OS isn't running</h1>
 <p>Start it with <code>pwsh -File start.ps1</code> in the agentic-os folder, then <a href="http://127.0.0.1:8810">reload</a>.</p></main>
-<script>const go = () => fetch('http://127.0.0.1:8810/api/status', { mode: 'no-cors' }).then(() => { location.href = 'http://127.0.0.1:8810' }).catch(() => {}); go(); setInterval(go, 3000)</script>
+<script>
+const win = window.__TAURI__.window.getCurrentWindow()
+const go = () => fetch('http://127.0.0.1:8810/api/status', { mode: 'no-cors' }).then(() => { location.href = 'http://127.0.0.1:8810' }).catch(() => {}); go(); setInterval(go, 3000)
+</script>
 </body></html>

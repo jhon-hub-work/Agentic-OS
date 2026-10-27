@@ -45,7 +45,7 @@ export default function Home() {
     <div className="relative h-[calc(100dvh-10rem)] min-h-[520px] md:h-[calc(100dvh-4rem)]">
       <div className="pointer-events-none absolute inset-[22%_8%] rounded-full bg-[radial-gradient(closest-side,rgba(63,182,236,0.25),transparent)] blur-3xl" />
       <WaveField pulse={replies} energy={energy} mood={mood}
-        className="absolute inset-0 h-full w-full [mask-image:radial-gradient(ellipse_75%_75%_at_50%_50%,black_55%,transparent)]" />
+        className="absolute inset-0 h-full w-full" />
 
       {/* panels spread to both sides of the waves, like data on Tony Stark's screen */}
       {(['left', 'right'] as const).map(side => (
