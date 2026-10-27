@@ -3,7 +3,7 @@ import * as THREE from 'three'
 
 /** Jharvis's "voice": a particle wave field (voice-recorder style), in Glacier colours.
  *  Follows the pointer; `pulse` changing sends a ring out (e.g. when the urgent task changes). */
-function WaveField({ pulse = 0, energy, className = '' }: { pulse?: number; energy?: { current: number }; className?: string }) {
+function WaveField({ pulse = 0, energy, mood, className = '' }: { pulse?: number; energy?: { current: number }; mood?: { current: string }; className?: string }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const smooth = useRef(0)
   const ripple = useRef(-10)
@@ -15,19 +15,26 @@ function WaveField({ pulse = 0, energy, className = '' }: { pulse?: number; ener
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
     const scene = new THREE.Scene()
     const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
-    camera.position.set(0, 2.4, 7)
-    camera.lookAt(0, -0.6, 0)
+    camera.position.set(0, 3.2, 9.5)
+    camera.lookAt(0, -0.4, 0)
 
-    const COLS = 140, ROWS = 40, W = 22, D = 7, n = COLS * ROWS
+    const COLS = 140, ROWS = 64, W = 30, D = 13, n = COLS * ROWS
     const pos = new Float32Array(n * 3), col = new Float32Array(n * 3)
-    const navy = new THREE.Color('#1F2D44'), sky = new THREE.Color('#3FB6EC'), steel = new THREE.Color('#5B6F86'), tmp = new THREE.Color()
+    // three palettes (edge, middle, edge): blue = normal, green = good news, red = urgent
+    const palettes = [['#5B6F86', '#3FB6EC', '#1F2D44'], ['#4E7A64', '#34C77B', '#17503A'], ['#86545B', '#EC4F57', '#5A1622']]
+    const cols = palettes.map(() => new Float32Array(n * 3)), tmp = new THREE.Color()
     for (let r = 0, i = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++, i++) {
       pos[i * 3] = (c / (COLS - 1) - 0.5) * W
       pos[i * 3 + 2] = (r / (ROWS - 1) - 0.5) * D
       const u = c / (COLS - 1)
-      tmp.copy(u < 0.5 ? steel : sky).lerp(u < 0.5 ? sky : navy, u < 0.5 ? u * 2 : (u - 0.5) * 2)
-      col.set([tmp.r, tmp.g, tmp.b], i * 3)
+      palettes.forEach(([a, b, d], k) => {
+        tmp.set(u < 0.5 ? a : b).lerp(new THREE.Color(u < 0.5 ? b : d), u < 0.5 ? u * 2 : (u - 0.5) * 2)
+        cols[k].set([tmp.r, tmp.g, tmp.b], i * 3)
+      })
     }
+    const start = mood?.current === 'good' ? 1 : mood?.current === 'urgent' ? 2 : 0
+    col.set(cols[start])
+    const mix = [0, 1, 2].map(k => k === start ? 1 : 0)
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3))
@@ -60,16 +67,27 @@ function WaveField({ pulse = 0, energy, className = '' }: { pulse?: number; ener
       const mx = mouse.x * W, since = t - ripple.current
       // voice: the owner's mic level or Jharvis speaking swells the waves (read from a ref, no re-render)
       smooth.current += ((energy?.current ?? 0) - smooth.current) * 0.15
-      const amp = 1 + smooth.current * 2.6
+      const amp = 1 + smooth.current * 4.5
       for (let i = 0; i < n; i++) {
         const x = pos[i * 3], z = pos[i * 3 + 2]
-        let y = (Math.sin(x * 0.55 + t * 0.9) * 0.35 + Math.sin(x * 1.3 - t * 1.4 + z * 0.8) * 0.18 * amp + Math.cos(z * 1.1 + t * 0.6) * 0.12) * (0.75 + amp * 0.25)
+        let y = (Math.sin(x * 0.55 + t * 0.9) * 0.35 + Math.sin(x * 1.3 - t * 1.4 + z * 0.8) * 0.18 * amp + Math.cos(z * 1.1 + t * 0.6) * 0.12) * (0.75 + amp * 0.25) * 1.8
         y += Math.exp(-((x - mx) ** 2) / 6) * (0.6 + mouse.y * -0.6)
         const d = Math.hypot(x, z * 2)
         if (since < 3) y += Math.sin(d * 2 - since * 9) * Math.exp(-since * 1.4) * Math.exp(-Math.abs(d - since * 4.5) * 0.8) * 0.9
         pos[i * 3 + 1] = y
       }
       geo.attributes.position.needsUpdate = true
+      // ease toward the mood's palette (about a second)
+      const want = mood?.current === 'good' ? 1 : mood?.current === 'urgent' ? 2 : 0
+      let moved = false
+      for (let k = 0; k < 3; k++) {
+        const d = (k === want ? 1 : 0) - mix[k]
+        if (Math.abs(d) > 0.002) { mix[k] += d * 0.05; moved = true }
+      }
+      if (moved) {
+        for (let j = 0; j < n * 3; j++) col[j] = cols[0][j] * mix[0] + cols[1][j] * mix[1] + cols[2][j] * mix[2]
+        geo.attributes.color.needsUpdate = true
+      }
       points.rotation.y = mouse.x * 0.25
       points.rotation.x = mouse.y * 0.08
       renderer.render(scene, camera)

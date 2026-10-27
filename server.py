@@ -4,6 +4,7 @@ Agentic OS — FastAPI Backend
 Multi-agent orchestration server for opencode, Hermes, agy CLI
 """
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -620,6 +621,58 @@ _msgs_lock = threading.Lock()
 class JharvisMessage(BaseModel):
     text: str
     role: str = "owner"   # "owner" from the dashboard, "jharvis" from Jharvis (its Slack posts are mirrored here)
+    mood: str = "normal"  # Jharvis's reply tone: normal | good | urgent (colours the waves)
+
+JHARVIS_PANELS = BASE_DIR / "data" / "jharvis" / "panels.json"
+
+class JharvisPanel(BaseModel):
+    id: str
+    title: str
+    lines: list[str] = []
+
+def _panels() -> list:
+    return json.loads(JHARVIS_PANELS.read_text()) if JHARVIS_PANELS.exists() else []
+
+@app.get("/api/jharvis/panels")
+def jharvis_panels():
+    """Glass panels Jharvis has put on his page (show-only; he opens and closes them)."""
+    return {"panels": _panels()}
+
+@app.post("/api/jharvis/panels")
+def jharvis_panel_show(p: JharvisPanel):
+    if not p.id.strip() or not p.title.strip() or len(p.lines) > 20:
+        raise HTTPException(400, "id and title required, at most 20 lines")
+    with _msgs_lock:
+        panels = [x for x in _panels() if x["id"] != p.id] + [{"id": p.id, "title": p.title[:120], "lines": [l[:300] for l in p.lines]}]
+        JHARVIS_PANELS.parent.mkdir(parents=True, exist_ok=True)
+        JHARVIS_PANELS.write_text(json.dumps(panels[-6:], indent=2))
+    return {"status": "shown"}
+
+@app.delete("/api/jharvis/panels/{pid}")
+def jharvis_panel_close(pid: str):
+    with _msgs_lock:
+        panels = [] if pid == "all" else [x for x in _panels() if x["id"] != pid]
+        JHARVIS_PANELS.write_text(json.dumps(panels, indent=2))
+    return {"status": "closed"}
+
+@app.post("/api/jharvis/transcribe")
+async def jharvis_transcribe(file: UploadFile = File(...)):
+    """The dashboard mic: speech -> text via VoiceStudio (works in Brave, which has no browser speech recognition)."""
+    import urllib.request
+    audio = await file.read()
+    if not audio or len(audio) > 25 * 1024 * 1024:
+        raise HTTPException(400, "empty or too long recording")
+    boundary = uuid.uuid4().hex
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-1\r\n"
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file.filename or 'talk.webm'}\"\r\n"
+            f"Content-Type: {file.content_type or 'audio/webm'}\r\n\r\n").encode() + audio + f"\r\n--{boundary}--\r\n".encode()
+    url = os.environ.get("VOICESTUDIO_URL", "http://127.0.0.1:3900") + "/v1/audio/transcriptions"
+    req = urllib.request.Request(url, body, {"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    try:
+        r = await asyncio.to_thread(lambda: urllib.request.urlopen(req, timeout=120).read())
+    except OSError as e:
+        raise HTTPException(503, f"VoiceStudio not answering ({e})")
+    return {"text": json.loads(r).get("text", "").strip()}
 
 @app.get("/api/jharvis/messages")
 def jharvis_messages(limit: int = Query(60, le=300)):
@@ -633,11 +686,31 @@ def jharvis_post(msg: JharvisMessage):
         raise HTTPException(400, "role must be owner or jharvis, text 1-8000 characters")
     with _msgs_lock:
         msgs = json.loads(JHARVIS_MSGS.read_text()) if JHARVIS_MSGS.exists() else []
-        item = {"id": str(uuid.uuid4())[:8], "role": msg.role, "text": msg.text.strip(), "timestamp": get_timestamp()}
+        item = {"id": str(uuid.uuid4())[:8], "role": msg.role, "text": msg.text.strip(), "timestamp": get_timestamp(),
+                "mood": msg.mood if msg.mood in ("good", "urgent") else "normal"}
         msgs = (msgs + [item])[-500:]
         JHARVIS_MSGS.parent.mkdir(parents=True, exist_ok=True)
         JHARVIS_MSGS.write_text(json.dumps(msgs, indent=2))
     return item
+
+class SpeakRequest(BaseModel):
+    text: str
+
+@app.post("/api/jharvis/speak")
+def jharvis_speak(req: SpeakRequest):
+    """A Jharvis reply as audio from VoiceStudio (same voice as his Slack clips), for the dashboard."""
+    import urllib.request
+    text = re.sub(r"\bJharvis\b", "Jarvis", re.sub(r"[*_~`>#|\[\]]", "", req.text)).strip()[:1500]
+    if not text:
+        raise HTTPException(400, "nothing to say")
+    body = json.dumps({"model": os.environ.get("VOICESTUDIO_MODEL", "omnivoice"), "input": text,
+                       "voice": os.environ.get("VOICESTUDIO_VOICE", "bf2f65dd"), "response_format": "wav"}).encode()
+    url = os.environ.get("VOICESTUDIO_URL", "http://127.0.0.1:3900") + "/v1/audio/speech"
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, body, {"Content-Type": "application/json"}), timeout=180) as r:
+            return Response(r.read(), media_type="audio/wav")
+    except OSError as e:
+        raise HTTPException(503, f"VoiceStudio not answering ({e})")
 
 @app.get("/api/jharvis/home")
 def jharvis_home():

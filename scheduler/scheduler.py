@@ -40,14 +40,20 @@ def emit_event(event: dict):
             pass
     _save_history(event)
 
+_history_lock = threading.Lock()
+
 def _save_history(event: dict):
-    history = []
-    if HISTORY_FILE.exists():
-        history = json.loads(HISTORY_FILE.read_text())
-    history.append(event)
-    if len(history) > 1000:
-        history = history[-1000:]
-    HISTORY_FILE.write_text(json.dumps(history, indent=2))
+    # lock + atomic replace: concurrent cron threads left a torn file (27 Oct)
+    with _history_lock:
+        history = []
+        if HISTORY_FILE.exists():
+            history = json.loads(HISTORY_FILE.read_text())
+        history.append(event)
+        if len(history) > 1000:
+            history = history[-1000:]
+        tmp = HISTORY_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(history, indent=2))
+        os.replace(tmp, HISTORY_FILE)
 
 def get_history(limit: int = 100) -> list:
     if not HISTORY_FILE.exists():

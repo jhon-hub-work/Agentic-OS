@@ -53,6 +53,20 @@ body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antiali
   border: 1px solid rgba(255, 255, 255, 0.85);
 }
 
+/* Jharvis's panels: clear liquid glass over the waves, edges lit so it still reads */
+.liquid-glass {
+  position: relative;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 55%, rgba(220, 238, 250, 0.08));
+  backdrop-filter: blur(1.5px) saturate(160%) brightness(1.03);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(255, 255, 255, 0.25),
+    inset 0 0 24px rgba(255, 255, 255, 0.18), 0 24px 50px -24px rgba(29, 43, 58, 0.35);
+}
+.liquid-glass::before {  /* the light streak across the top, like a curved glass edge */
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  background: radial-gradient(120% 60% at 20% -10%, rgba(255, 255, 255, 0.55), transparent 55%);
+}
+
 .glass-bar.sheet { background: rgba(240, 246, 250, 0.94); box-shadow: 0 -12px 40px -16px rgba(29, 43, 58, 0.35); }
 
 /* 10: navy chrome */
