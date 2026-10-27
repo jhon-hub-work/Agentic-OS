@@ -6,6 +6,14 @@ import { inputCls, spring } from './ui'
 export type Mood = 'normal' | 'good' | 'urgent'
 type Msg = { id: string; role: 'owner' | 'jharvis'; text: string; timestamp: string; mood?: Mood }
 
+// Alerts are written for Slack (<url|Job title>, :emoji:, "Jhon,"); on his page he says just the gist
+export const brief = (t: string) => t
+  .replace(/<https?:[^|>]+\|([^>]+)>/g, '$1')
+  .replace(/<https?:[^>]+>|https?:\/\/\S+/g, '')
+  .replace(/:[a-z_]+:/g, '')
+  .replace(/^\s*Jhon,/, 'Sir,')
+  .replace(/\s+/g, ' ').trim()
+
 const level = (an: AnalyserNode, buf: Uint8Array<ArrayBuffer>, gain: number) => {
   an.getByteTimeDomainData(buf)
   let sum = 0
@@ -54,17 +62,17 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
         if (seen.current === null) {
           seen.current = new Set(messages.map(m => m.id))
           const last = [...messages].reverse().find(m => m.role === 'jharvis')
-          if (last && !sample) setSubtitle(last.text)
+          if (last && !sample) setSubtitle(brief(last.text))
           return
         }
         for (const m of messages) if (!seen.current.has(m.id)) {
           seen.current.add(m.id)
-          if (m.role === 'jharvis') { setStatus('idle'); setSubtitle(m.text); onReply(); setMood(m.mood ?? 'normal'); speak(m.text) }
+          if (m.role === 'jharvis') { setStatus('idle'); setSubtitle(brief(m.text)); onReply(); setMood(m.mood ?? 'normal'); speak(brief(m.text)) }
         }
       } catch { /* the OS restarting; try again next tick */ }
     }
     tick()
-    const t = setInterval(tick, 2500)
+    const t = setInterval(tick, 1000)  // a 2.5 s poll added ~1 s to every answer
     return () => { alive = false; clearInterval(t); stopMic.current(); stopSpeech.current(); speechSynthesis?.cancel() }
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -106,8 +114,23 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
     }
   }
 
+  // said the moment you finish, so there's no dead air while he thinks (his real answer takes several seconds)
+  const ack = useRef<Promise<ArrayBuffer | null> | null>(null)
+  const loadAck = () => ack.current ??= fetch('/api/jharvis/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'One moment, sir.' }) })
+      .then(r => r.ok ? r.arrayBuffer() : null).catch(() => null)
+  useEffect(() => { loadAck() }, [])  // made once up front (VoiceStudio needs ~3 s), so it plays instantly
+  async function acknowledge() {
+    if (mutedRef.current) return
+    const data = await loadAck()
+    if (!data) { ack.current = null; return }
+    const c = ctx(), src = c.createBufferSource()
+    src.buffer = await c.decodeAudioData(data.slice(0))
+    src.connect(c.destination); src.start()
+  }
+
   async function send(m: string) {
     if (!m.trim()) return
+    acknowledge()
     setError(null); setStatus('thinking'); setSubtitle(m)
     try {
       const r = await fetch('/api/jharvis/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'owner', text: m.trim() }) })
