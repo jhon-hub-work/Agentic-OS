@@ -2,6 +2,7 @@ import { motion } from 'motion/react'
 import { useEffect, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { AGENT_META } from './api'
 
 export const spring = { type: 'spring', bounce: 0, duration: 0.4 } as const
 
@@ -70,16 +71,16 @@ export function AgentLogo({ name, size = 28 }: { name: string; size?: number }) 
   return (
     <span className="flex shrink-0 items-center justify-center rounded-[30%] border border-white bg-[#FFFFFF] shadow-[0_4px_12px_-6px_rgba(29,43,58,0.35)]"
       style={{ width: size, height: size }}>
-      <img src={`/agents/${name}.svg`} alt="" className="h-[68%] w-[68%] object-contain" />
+      {AGENT_META[name]?.custom && !AGENT_META[name].logo  // an added agent without a logo: its first letter
+        ? <span className="font-medium text-[#1D2B3A]" style={{ fontSize: size * 0.45 }} aria-hidden="true">{AGENT_META[name].label[0]?.toUpperCase()}</span>
+        : <img src={AGENT_META[name]?.custom ? `/api/agents/${name}/logo?v=${AGENT_META[name].logo}` : `/agents/${name}.svg`} alt="" className="h-[68%] w-[68%] object-contain" />}
     </span>
   )
 }
 
-const AGENT_LABELS: Record<string, string> = { claude: 'Claude Code', opencode: 'OpenCode', hermes: 'Hermes', agy: 'agy' }
-
 /** Pill toggles for choosing one or several agents. */
-export function AgentPicker<T extends string>({ value, onChange, multi = false, legend }: { value: T[]; onChange: (v: T[]) => void; multi?: boolean; legend: string }) {
-  const all = Object.keys(AGENT_LABELS) as T[]
+export function AgentPicker<T extends string>({ value, onChange, multi = false, legend, only }: { value: T[]; onChange: (v: T[]) => void; multi?: boolean; legend: string; only?: string[] }) {
+  const all = Object.keys(AGENT_META).filter(a => !only || only.includes(a)) as T[]
   return (
     <fieldset className="flex flex-wrap gap-2">
       <legend className="mb-2 text-sm font-medium text-ink">{legend}</legend>
@@ -89,7 +90,7 @@ export function AgentPicker<T extends string>({ value, onChange, multi = false, 
           <button type="button" key={a} aria-pressed={on}
             onClick={() => onChange(multi ? (on ? value.filter(v => v !== a) : [...value, a]) : [a])}
             className={`flex min-h-11 cursor-pointer items-center gap-2 rounded-full border py-1 pl-1.5 pr-4 text-sm transition-colors duration-200 ${on ? 'border-navy bg-navy text-white' : 'border-white bg-white/60 text-ink-2 hover:bg-white'}`}>
-            <AgentLogo name={a} size={26} />{AGENT_LABELS[a]}
+            <AgentLogo name={a} size={26} />{AGENT_META[a].label}
           </button>
         )
       })}

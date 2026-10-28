@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from harness import Harness  # noqa: E402
+from harness import PROJECT_ROOT, Harness  # noqa: E402
+import json  # noqa: E402
 
 import server  # noqa: E402
 
@@ -197,3 +198,148 @@ class DiffViewerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TicketFileTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.h = Harness()
+        cls.h.start()
+        cls.patches = [mock.patch.object(server, "TICKETS_FILE", cls.h.tmp / "data" / "tickets" / "tickets.json"),
+                       mock.patch.object(server, "TICKET_FILES", cls.h.tmp / "data" / "tickets" / "files")]
+        for p in cls.patches:
+            p.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in cls.patches:
+            p.stop()
+        cls.h.stop()
+
+    def test_attach_and_read_back(self):
+        status, t = self.h.api("POST", "/api/tickets", {"title": "t", "severity": "P4", "project": str(self.h.tmp)})
+        self.assertEqual(status, 200)
+        status, t = self.h.upload(f"/api/tickets/{t['id']}/files", {}, "../../evil name.png", b"\x89PNG data")
+        self.assertEqual(status, 200)
+        self.assertEqual(t["files"], ["01_evil_name.png"])  # path parts dropped, unsafe characters replaced
+        self.assertTrue((self.h.tmp / "data" / "tickets" / "files" / t["id"] / "01_evil_name.png").exists())
+        self.assertIn("01_evil_name.png", server._ticket_prompt(t, "plan"))
+        status, _ = self.h.request("GET", f"/api/tickets/{t['id']}/files/01_evil_name.png")
+        self.assertEqual(status, 200)
+        status, _ = self.h.request("GET", f"/api/tickets/{t['id']}/files/tickets.json")  # not listed on the ticket
+        self.assertEqual(status, 404)
+
+    def test_bad_ticket_id(self):
+        status, _ = self.h.upload("/api/tickets/..%2F..%2Fx/files", {}, "a.png", b"x")
+        self.assertEqual(status, 404)
+
+
+class ChangeJournalTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.h = Harness()
+        cls.h.start()
+        cls.patches = [mock.patch.object(server, "TICKETS_FILE", cls.h.tmp / "data" / "tickets" / "tickets.json"),
+                       mock.patch.object(server, "CHANGE_JOURNAL", cls.h.tmp / "data" / "journal")]
+        for p in cls.patches:
+            p.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in cls.patches:
+            p.stop()
+        cls.h.stop()
+
+    def _edit(self, tid, f: Path, text: str):
+        """What a fix run does: hook before, the edit, hook after."""
+        import subprocess as sp
+        hook = [sys.executable, str(PROJECT_ROOT / "journal_hook.py"), str(server.CHANGE_JOURNAL), tid]
+        ev = {"tool_name": "Write", "tool_input": {"file_path": str(f)}, "cwd": str(f.parent)}
+        sp.run(hook, input=json.dumps({**ev, "hook_event_name": "PreToolUse"}), text=True, check=True)
+        f.write_text(text)
+        sp.run(hook, input=json.dumps({**ev, "hook_event_name": "PostToolUse"}), text=True, check=True)
+
+    def test_undo_restores_and_moves_new_files(self):
+        status, t = self.h.api("POST", "/api/tickets", {"title": "j", "severity": "P4", "project": str(self.h.tmp)})
+        old, new = self.h.tmp / "old.txt", self.h.tmp / "new.txt"
+        old.write_text("before")
+        self._edit(t["id"], old, "after")
+        self._edit(t["id"], new, "made by claude")
+        status, ch = self.h.api("GET", f"/api/tickets/{t['id']}/changes")
+        self.assertEqual(len(ch["changes"]), 2)
+        status, _ = self.h.api("POST", f"/api/tickets/{t['id']}/undo")
+        self.assertEqual(status, 200)
+        self.assertEqual(old.read_text(), "before")
+        self.assertFalse(new.exists())  # moved aside, not deleted
+        self.assertTrue((server.CHANGE_JOURNAL / "removed" / t["id"] / "new.txt").exists())
+        status, ch = self.h.api("GET", f"/api/tickets/{t['id']}/changes")
+        self.assertEqual(ch["changes"], [])
+
+    def test_undo_refuses_when_edited_again(self):
+        status, t = self.h.api("POST", "/api/tickets", {"title": "k", "severity": "P4", "project": str(self.h.tmp)})
+        f = self.h.tmp / "later.txt"
+        f.write_text("v1")
+        self._edit(t["id"], f, "v2")
+        f.write_text("v3 by hand")
+        status, _ = self.h.api("POST", f"/api/tickets/{t['id']}/undo")
+        self.assertEqual(status, 409)
+        self.assertEqual(f.read_text(), "v3 by hand")
+
+
+class CustomAgentTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.h = Harness()
+        cls.h.start()
+        cls.patches = [mock.patch.object(server, "CUSTOM_AGENTS_FILE", cls.h.tmp / "data" / "agents.json"),
+                       mock.patch.object(server, "REAUTH_FILE", cls.h.tmp / "data" / "reauth.json")]
+        for p in cls.patches:
+            p.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in cls.patches:
+            p.stop()
+        server.load_custom_agents()
+        cls.h.stop()
+
+    def _add(self, answer):
+        body = {"id": "echoer", "label": "Echoer", "role": "test agent", "command": "python -c pass", "relogin": "echo hi"}
+        with mock.patch.object(server, "run_custom_agent", return_value=(0, answer, "")), \
+             mock.patch.object(server, "find_agent_logo", return_value=None):
+            return self.h.api("POST", "/api/agents", body)
+
+    def test_logo_lookup_tries_sources_and_keeps_only_svg(self):
+        import io
+        tried = []
+
+        def fake_open(url, timeout):
+            tried.append(url)
+            if "lobehub" in url and "-color" in url:
+                raise OSError("404")
+            return io.BytesIO(b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+        agent = {"id": "codex", "label": "Codex", "command": ["codex", "exec"]}
+        with mock.patch.object(server, "AGENT_LOGOS", self.h.tmp / "logos"), \
+             mock.patch.object(server.urllib.request, "urlopen", fake_open):
+            self.assertEqual(server.find_agent_logo(agent), "codex.svg")
+            self.assertTrue((self.h.tmp / "logos" / "codex.svg").read_bytes().startswith(b"<svg"))
+        self.assertEqual(len(tried), 2)  # colour version missing, plain one taken
+        with mock.patch.object(server.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(b"<html>not a logo</html>")), \
+             mock.patch.object(server, "AGENT_LOGOS", self.h.tmp / "logos2"):
+            self.assertIsNone(server.find_agent_logo(agent))
+
+    def test_add_needs_a_passing_test_then_joins_everything(self):
+        status, _ = self._add("no idea")
+        self.assertEqual(status, 400)  # didn't say hello: not saved
+        self.assertNotIn("echoer", server.AGENTS)
+        status, _ = self._add("hello")
+        self.assertEqual(status, 200)
+        self.assertIn("echoer", server.AGENTS)
+        self.assertEqual(server.TEAM_ROLES["echoer"], "test agent")
+        status, r = self.h.api("GET", "/api/reauth")
+        self.assertIn("echoer", [a["id"] for a in r["accounts"]])  # has a re-login command: on the weekly card
+        status, _ = self.h.api("POST", "/api/agents", {"id": "claude", "label": "x", "role": "x", "command": "python"})
+        self.assertEqual(status, 409)
+        status, _ = self.h.api("DELETE", "/api/agents/echoer")
+        self.assertEqual(status, 200)
+        self.assertNotIn("echoer", server.AGENTS)

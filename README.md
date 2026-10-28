@@ -13,6 +13,7 @@ One place to run four AI agents as a team, with **Jharvis** as the boss. Fork of
 - **Job pipeline**: finds jobs, filters by your rules, scores (OpenCode), drafts (Claude); nothing is sent until you
   tap Approve, then it applies like Hoot (OnlineJobs reply, Greenhouse/Lever/Ashby forms) or hands it to you.
 - **Billing**: every agent call logged with tokens and cost.
+- **Tickets**: IT-style tickets (P1-P4 SLA): Claude plans the fix, you approve, Claude does it.
 - **Dashboard**: React 19 + Vite + Tailwind 4, "Glacier" design, Three.js voice-wave home page that reacts to your mic.
 
 Setup: copy `config/owner.example.json` to `config/owner.json` and fill in your details (it stays out of git).

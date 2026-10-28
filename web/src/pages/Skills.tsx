@@ -1,6 +1,6 @@
-import { Play, Plus } from '@phosphor-icons/react'
-import { useState } from 'react'
-import { api, type AgentName, type Skill } from '../api'
+import { PaperPlaneRight, Play, Plus } from '@phosphor-icons/react'
+import { useEffect, useRef, useState } from 'react'
+import { api, type AgentName, type LabRun, type Skill } from '../api'
 import { AgentPicker, ChromeButton, Empty, ErrorLine, Field, PageHead, Panel, Prose, Skeleton, inputCls, usePoll } from '../ui'
 
 const summary = (s: Skill) =>
@@ -29,6 +29,7 @@ export default function Skills() {
       <PageHead eyebrow="Skills" title="What the OS knows how to do" sub="Each skill is a recipe an agent follows. Pick one, add details, run it."
         action={<ChromeButton onClick={() => setAdding(a => !a)} icon={<Plus size={16} weight="bold" aria-hidden="true" />}>{adding ? 'Close' : 'New skill'}</ChromeButton>} />
       {adding && <Panel className="mb-5"><NewSkill onDone={() => setAdding(false)} /></Panel>}
+      <Panel className="mb-5"><SkillLab /></Panel>
       {error && <ErrorLine msg={error} />}
       {!data ? <Skeleton className="h-64" /> : skills.length === 0 ? <Empty title="No skills" hint="Add a folder under skills/ with a SKILL.md." /> : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -95,5 +96,76 @@ function NewSkill({ onDone }: { onDone: () => void }) {
       {error && <p role="alert" className="text-sm text-bad">{error}</p>}
       <div><ChromeButton type="submit" disabled={busy} icon={<Plus size={16} weight="bold" aria-hidden="true" />}>{busy ? 'Saving' : 'Save skill'}</ChromeButton></div>
     </form>
+  )
+}
+
+const LAB_STATUS: Record<LabRun['status'], string> = { running: 'Working…', passed: 'Passed', failed: 'Failed', blocked: 'Blocked', error: 'Stopped' }
+
+/** "Install this skill": find it, scan it, test and improve it in the sandbox, install only at the pass mark. */
+function SkillLab() {
+  const { data, reload } = usePoll(api.skillLab, 3000)
+  const [text, setText] = useState('')
+  const [rounds, setRounds] = useState(6)
+  const [err, setErr] = useState('')
+  const end = useRef<HTMLDivElement>(null)
+  const runs = data?.runs.slice(-5) ?? []
+  const busy = runs.some(r => r.status === 'running')
+  const count = runs.reduce((n, r) => n + r.messages.length, 0)
+  useEffect(() => { end.current?.scrollIntoView({ block: 'nearest' }) }, [count])
+  async function send(e: React.FormEvent) {
+    e.preventDefault()
+    if (!text.trim()) { setErr('Say which skill, or paste a GitHub link.'); return }
+    setErr('')
+    try { await api.startSkillLab(text.trim(), rounds); setText(''); reload() } catch (x) { setErr((x as Error).message) }
+  }
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-sm font-medium text-ink-2">Skill lab</h2>
+        <p className="text-xs text-ink-3">Ask for a skill. It's found, checked by NVIDIA SkillSpector and a safety read, then tested in a sandbox (its scripts never run). Each round it's scored and improved. It installs for every agent only at {data?.pass ?? 85}% or better.</p>
+      </div>
+      <div className="flex max-h-[28rem] flex-col gap-4 overflow-y-auto rounded-2xl border border-white bg-white/45 p-4" aria-live="polite">
+        {runs.length === 0 && <p className="text-sm text-ink-3">Try: "install a skill for writing changelogs" or paste a GitHub link.</p>}
+        {runs.map(r => (
+          <div key={r.id} className="flex flex-col gap-2">
+            {r.messages.map((m, i) => m.who === 'you'
+              ? <p key={i} className="max-w-[80%] self-end rounded-2xl bg-navy px-4 py-2 text-sm text-white">{m.text}</p>
+              : <div key={i} className="max-w-[90%] self-start rounded-2xl border border-white bg-white/75 px-4 py-2"><Prose text={m.text} /></div>)}
+            {r.scores.length > 0 && <Scores scores={r.scores} pass={data?.pass ?? 85} rounds={r.rounds} />}
+            <p className={`self-start text-xs ${r.status === 'passed' ? 'text-ok' : r.status === 'running' ? 'text-ink-3' : 'text-bad'}`}>
+              {r.name || 'skill'}: {LAB_STATUS[r.status]}{r.installed_to ? ' and installed' : ''}</p>
+          </div>
+        ))}
+        <div ref={end} />
+      </div>
+      <form onSubmit={send} className="flex flex-col gap-3 md:flex-row md:items-end">
+        <label className="flex flex-1 flex-col gap-1 text-sm font-medium text-ink">Message
+          <input value={text} onChange={e => { setText(e.target.value); setErr('') }} disabled={busy}
+            placeholder={busy ? 'Wait for the current skill to finish' : 'install the … skill'} className={inputCls} />
+        </label>
+        <label className="flex flex-col gap-1 text-sm font-medium text-ink">Rounds: {rounds}
+          <input type="range" min={4} max={10} value={rounds} onChange={e => setRounds(+e.target.value)} disabled={busy} className="w-40" />
+        </label>
+        <ChromeButton type="submit" disabled={busy} icon={<PaperPlaneRight size={14} weight="fill" aria-hidden="true" />}>Send</ChromeButton>
+      </form>
+      {err && <p role="alert" className="text-sm text-bad">{err}</p>}
+    </div>
+  )
+}
+
+/** One bar per round; the line is the pass mark. */
+function Scores({ scores, pass, rounds }: { scores: number[]; pass: number; rounds: number }) {
+  return (
+    <div className="self-start" aria-label={`Scores per round: ${scores.join(', ')}%. Pass is ${pass}%.`}>
+      <div className="relative flex h-16 items-end gap-1.5">
+        <div className="absolute inset-x-0 border-t border-dashed border-ok" style={{ bottom: `${pass}%` }} />
+        {Array.from({ length: rounds }, (_, i) => (
+          <div key={i} title={scores[i] != null ? `Round ${i + 1}: ${scores[i]}%` : `Round ${i + 1}`}
+            className={`w-5 rounded-t ${scores[i] == null ? 'bg-ink-3/15' : scores[i] >= pass ? 'bg-ok' : 'bg-navy/70'}`}
+            style={{ height: `${Math.max(scores[i] ?? 4, 4)}%` }} />
+        ))}
+      </div>
+      <p className="mt-1 text-[11px] text-ink-3">Rounds · dashed line = {pass}% pass</p>
+    </div>
   )
 }

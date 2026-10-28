@@ -1,4 +1,4 @@
-import { Briefcase, List, X, CalendarDots, Waveform, ChatsCircle, Coins, DotsThreeOutline, Lightning, ListBullets, Plug, SquaresFour, UsersFour, UsersThree, type Icon } from '@phosphor-icons/react'
+import { Briefcase, List, X, CalendarDots, Waveform, ChatsCircle, Coins, DotsThreeOutline, Lightning, ListBullets, Plug, SquaresFour, Ticket, UsersFour, UsersThree, type Icon } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useState } from 'react'
 import Activity from './pages/Activity'
@@ -12,6 +12,7 @@ import Cost from './pages/Cost'
 import Overview from './pages/Overview'
 import Skills from './pages/Skills'
 import Team from './pages/Team'
+import Tickets from './pages/Tickets'
 import ThemeSwitch from './ThemeSwitch'
 import TitleBar, { inApp } from './TitleBar'
 import { spring } from './ui'
@@ -19,6 +20,7 @@ import { spring } from './ui'
 const NAV: { id: string; label: string; icon: Icon }[] = [
   { id: 'home', label: 'Jharvis', icon: Waveform },
   { id: 'jobs', label: 'Jobs', icon: Briefcase },
+  { id: 'tickets', label: 'Tickets', icon: Ticket },
   { id: 'chats', label: 'Chats', icon: ChatsCircle },
   { id: 'sessions', label: 'Sessions', icon: UsersFour },
   { id: 'schedules', label: 'Schedules', icon: CalendarDots },
@@ -101,6 +103,7 @@ export default function App() {
             {page === 'home' && <Home />}
             {page === 'overview' && <Overview go={go} />}
             {page === 'jobs' && <Jobs />}
+            {page === 'tickets' && <Tickets />}
             {page === 'chats' && <Chats />}
             {page === 'sessions' && <Sessions />}
             {page === 'schedules' && <Schedules />}

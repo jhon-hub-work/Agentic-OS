@@ -1,4 +1,4 @@
-export type AgentName = 'claude' | 'opencode' | 'hermes' | 'agy'
+export type AgentName = string  // the 4 built in + any added on Agents & tools (AGENT_META, filled by loadAgents)
 export type Agent = { name: AgentName; status: 'online' | 'offline' }
 export type CostEntry = { timestamp: string; agent: string; tokens: number; cost: number; model: string }
 export type AuditEntry = { id?: string; action: string; timestamp: string; agent?: string; skill?: string; msg_preview?: string; output_preview?: string; thread?: string; hops?: number }
@@ -16,6 +16,12 @@ export type Job = { id: string; name: string; kind: 'agent' | 'team' | 'skill'; 
 export type JobEvent = { type: string; job_id?: string; name?: string; output?: string; trigger?: string; timestamp: string }
 
 export type JobPost = { id: string; title: string; company: string; url: string; source: string; pay?: string; score?: number; reason?: string; lane: string; status: 'new' | 'queued' | 'drafted' | 'draft_blocked' | 'needs_you' | 'approved' | 'applying' | 'handoff' | 'closed' | 'skipped' | 'applied' | 'replied'; draft: string; applied_at?: string; follow_up?: 'due' | 'done'; followup_draft?: string; followup_problem?: string; problem?: string; apply_result?: string; needs_why?: string; found: string }
+export type Plugin = { id: string; name: string; description: string; enabled: boolean; skills: boolean; mcp: Record<string, unknown> }
+export type LabRun = { id: string; request: string; rounds: number; status: 'running' | 'passed' | 'failed' | 'blocked' | 'error'; name: string; source: string; scores: number[]; created: string; installed_to?: string; messages: { at: string; who: 'you' | 'lab'; text: string }[] }
+export type TicketSeverity = 'P1' | 'P2' | 'P3' | 'P4'
+export type TicketCategory = 'incident' | 'bug' | 'request' | 'change'
+export type TicketStatus = 'new' | 'planning' | 'awaiting_approval' | 'approved' | 'in_progress' | 'waiting_on_you' | 'resolved' | 'closed'
+export type Ticket = { id: string; title: string; description: string; category: TicketCategory; severity: TicketSeverity; status: TicketStatus; project: string; reporter: string; assignee: string; created: string; updated: string; pickup_by: string; due: string; plan: string; result: string; files?: string[]; log: { at: string; who: string; text: string }[] }
 export type JobRun = { started: string; finished?: string; fetched: number; new: number; kept: number; scored: number; drafted: number; needs_you: number; errors: string[] }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -82,16 +88,59 @@ export const api = {
   addIndeedJob: (url: string) => req<JobPost>('/api/jobs/add', { method: 'POST', body: JSON.stringify({ url }) }),
   decideJob: (id: string, decision: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up', who = '') =>
     req<JobPost>(`/api/jobs/${id}/decision?who=${who}`, { method: 'POST', body: JSON.stringify({ decision }) }),
+  plugins: () => req<{ plugins: Plugin[] }>('/api/claude-plugins'),
+  togglePlugin: (id: string, enabled: boolean) =>
+    req<{ results: Record<string, { ok: boolean; text: string }>; skills_synced: string[] }>(`/api/claude-plugins/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  skillLab: () => req<{ runs: LabRun[]; pass: number }>('/api/skill-lab'),
+  startSkillLab: (message: string, rounds: number) => req<LabRun>('/api/skill-lab', { method: 'POST', body: JSON.stringify({ message, rounds }) }),
+  addAgent: (a: { id: string; label: string; role: string; command: string; timeout: number; relogin: string }) =>
+    req<CustomAgent & { test_answer: string }>('/api/agents', { method: 'POST', body: JSON.stringify(a) }),
+  findAgentLogo: (id: string) => req<{ logo: string }>(`/api/agents/${id}/logo/find`, { method: 'POST' }),
+  removeAgent: (id: string) => req<unknown>(`/api/agents/${id}`, { method: 'DELETE' }),
+  uploadAgentLogo: async (id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const r = await fetch(`/api/agents/${id}/logo`, { method: 'POST', body: form })
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `Upload failed (${r.status})`)
+  },
+  tickets: () => req<{ tickets: Ticket[]; sla: Record<TicketSeverity, [number, number]> }>('/api/tickets'),
+  createTicket: (t: Pick<Ticket, 'title' | 'description' | 'category' | 'severity' | 'project'>) =>
+    req<Ticket>('/api/tickets', { method: 'POST', body: JSON.stringify(t) }),
+  patchTicket: (id: string, p: Partial<Pick<Ticket, 'title' | 'severity' | 'status' | 'due'>>) =>
+    req<Ticket>(`/api/tickets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  commentTicket: (id: string, text: string) => req<Ticket>(`/api/tickets/${id}/comment`, { method: 'POST', body: JSON.stringify({ text }) }),
+  attachTicketFile: async (id: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    const r = await fetch(`/api/tickets/${id}/files`, { method: 'POST', body: form })  // no JSON header: the browser sets the multipart one
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `Upload failed (${r.status})`)
+    return r.json() as Promise<Ticket>
+  },
+  ticketChanges: (id: string) => req<{ changes: { file: string; before: string | null; changed_since: boolean }[] }>(`/api/tickets/${id}/changes`),
+  undoTicket: (id: string) => req<Ticket>(`/api/tickets/${id}/undo`, { method: 'POST' }),
+  selfReview: () => req<{ last?: string; running?: boolean; opened?: string[]; problem?: string | null }>('/api/self-review'),
+  runSelfReview: () => req<unknown>('/api/self-review/run', { method: 'POST' }),
+  approveTicket: (id: string) => req<Ticket>(`/api/tickets/${id}/approve`, { method: 'POST' }),
+  rejectTicket: (id: string, text: string) => req<Ticket>(`/api/tickets/${id}/reject`, { method: 'POST', body: JSON.stringify({ text }) }),
   threads: () => req<{ threads: Thread[] }>('/api/team'),
   thread: (id: string) => req<Thread>(`/api/team/${id}`),
   startTeam: (message: string, agent: AgentName) => req<Thread>('/api/team', { method: 'POST', body: JSON.stringify({ message, agent }) }),
 }
 
-export const AGENT_META: Record<AgentName, { label: string; role: string }> = {
+export const AGENT_META: Record<AgentName, { label: string; role: string; custom?: boolean; logo?: string | null; command?: string }> = {
   claude: { label: 'Claude Code', role: 'Writing and hard reasoning' },
   opencode: { label: 'OpenCode', role: 'Code, checks, bulk work' },
   hermes: { label: 'Hermes', role: 'Schedules and your phone' },
   agy: { label: 'agy', role: 'Web research' },
+}
+
+export type CustomAgent = { id: string; label: string; role: string; builtin: boolean; command?: string; logo?: string | null; timeout?: number }
+
+/** Adds Jhon's own agents to AGENT_META. Called once before the app renders, and again after an add or remove. */
+export async function loadAgents() {
+  const { agents } = await req<{ agents: CustomAgent[] }>('/api/agents')
+  for (const k of Object.keys(AGENT_META)) if (AGENT_META[k].custom) delete AGENT_META[k]
+  for (const a of agents) if (!a.builtin) AGENT_META[a.id] = { label: a.label, role: a.role, custom: true, logo: a.logo, command: a.command }
 }
 
 export const fmtTokens = (n: number) => n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`

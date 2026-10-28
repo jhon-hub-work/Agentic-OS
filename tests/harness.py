@@ -56,6 +56,9 @@ class Harness:
         server.GOALS_FILE = self.tmp / "data" / "goals.json"
         server.JOURNAL_DIR = self.tmp / "brain" / "journal"
         server.UPLOAD_DIR = self.tmp / "data" / "uploads"
+        server.CUSTOM_AGENTS_FILE = self.tmp / "data" / "agents.json"  # the owner's added agents stay out of tests
+        server.AGENT_LOGOS = self.tmp / "data" / "agent-logos"
+        server.load_custom_agents()
 
         pipeline.BOARD = self.tmp / "data" / "jobs" / "board.json"
 

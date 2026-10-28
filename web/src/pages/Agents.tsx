@@ -1,9 +1,9 @@
 import { Plug, Plus } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
-import { AGENT_META, api, type AgentName } from '../api'
+import { AGENT_META, api, loadAgents, type AgentName, type Plugin } from '../api'
 import { AgentLogo, AgentPicker, ChromeButton, Field, PageHead, Panel, Skeleton, inputCls } from '../ui'
 
-const AGENTS = Object.keys(AGENT_META) as AgentName[]
+const MCP_AGENTS = ['claude', 'opencode', 'hermes', 'agy']  // added agents have no MCP command
 
 export default function Agents() {
   const [conns, setConns] = useState<Awaited<ReturnType<typeof api.connections>> | null>(null)
@@ -15,10 +15,12 @@ export default function Agents() {
     <>
       <PageHead eyebrow="Agents & tools" title="Models and connections" sub="Choose each agent's model, and connect MCP servers (tools like Notion, GitHub, a database) to the agents that should use them." />
       <Panel className="mb-5"><Relogin /></Panel>
+      <Panel className="mb-5"><MyAgents /></Panel>
       <Panel className="mb-5"><Models /></Panel>
+      <Panel className="mb-5"><Plugins /></Panel>
       <Panel className="mb-5"><AddConnection onAdded={load} /></Panel>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {AGENTS.map(a => (
+        {MCP_AGENTS.map(a => (
           <Panel key={a}>
             <div className="mb-3 flex items-center gap-3">
               <AgentLogo name={a} size={36} />
@@ -99,7 +101,7 @@ function AddConnection({ onAdded }: { onAdded: () => void }) {
           <input id="c-target" value={target} onChange={e => setTarget(e.target.value)} className={`${inputCls} font-mono text-sm`} placeholder="https://mcp.example.com/mcp" />
         </Field>
       </div>
-      <AgentPicker multi legend="Add it to" value={agents} onChange={setAgents} />
+      <AgentPicker multi legend="Add it to" value={agents} onChange={setAgents} only={MCP_AGENTS} />
       {error && <p role="alert" className="text-sm text-bad">{error}</p>}
       {results && (
         <ul className="flex flex-col gap-1 text-sm">
@@ -141,6 +143,130 @@ function Relogin() {
         </ul>
       )}
       {msg && <p role="status" className="mt-3 text-sm text-ink-2">{msg}</p>}
+    </div>
+  )
+}
+
+/** One switch per Claude plugin: on = Claude loads it, the other agents get its skills and tool servers. */
+function Plugins() {
+  const [list, setList] = useState<Plugin[] | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState('')
+  useEffect(() => { api.plugins().then(r => setList(r.plugins)).catch(e => setMsg(e.message)) }, [])
+  async function flip(p: Plugin) {
+    setBusy(p.id); setMsg('')
+    try {
+      const r = await api.togglePlugin(p.id, !p.enabled)
+      const bad = Object.entries(r.results).filter(([, v]) => !v.ok).map(([k, v]) => `${k}: ${v.text}`)
+      setList(l => l!.map(x => x.id === p.id ? { ...x, enabled: !p.enabled } : x))
+      setMsg(`${p.name} ${p.enabled ? 'off' : 'on'} for every agent.${bad.length ? ' Problems: ' + bad.join('; ') : ''}`)
+    } catch (e) { setMsg((e as Error).message) } finally { setBusy(null) }
+  }
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-sm font-medium text-ink-2">Plugins</h2>
+        <p className="text-xs text-ink-3">On = Claude Code loads it; OpenCode, Hermes and agy get its skills and tool servers. Hooks stay Claude-only. New Claude chats pick it up.</p>
+      </div>
+      {!list ? <Skeleton className="h-24" /> : (
+        <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          {list.map(p => (
+            <li key={p.id} className="flex items-start gap-3 rounded-2xl border border-white bg-white/55 p-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-ink">{p.name}</p>
+                <p className="line-clamp-2 text-xs text-ink-3">{p.description || p.id}</p>
+                <p className="mt-1 text-[11px] text-ink-3">{[p.skills && 'skills', Object.keys(p.mcp).length > 0 && 'tool server'].filter(Boolean).join(' · ') || 'hooks/commands only'}</p>
+              </div>
+              <button role="switch" aria-checked={p.enabled} aria-label={`${p.name} for every agent`} disabled={busy !== null} onClick={() => flip(p)}
+                className={`relative h-7 w-12 shrink-0 cursor-pointer rounded-full border transition-colors disabled:opacity-50 ${p.enabled ? 'border-navy bg-navy' : 'border-ink-3/40 bg-ink-3/25'}`}>
+                <span className={`absolute top-0.5 h-5.5 w-5.5 rounded-full bg-white shadow transition-all ${p.enabled ? 'left-[1.4rem]' : 'left-0.5'}`} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {busy && <p className="text-xs text-ink-3">Switching… (adding tool servers to each agent can take a minute)</p>}
+      {msg && <p role="status" className="text-xs text-ink-2">{msg}</p>}
+    </div>
+  )
+}
+
+// Known CLIs, filled in with their read-only switch. The prompt goes in on stdin unless the command has {prompt}.
+const PRESETS = [
+  { id: 'codex', label: 'Codex', role: 'Second opinion on code and plans (OpenAI)', command: 'codex exec --sandbox read-only --skip-git-repo-check --color never -', relogin: 'codex logout && codex login' },
+]
+
+/** Jhon's own command-line agents: they join chats, sessions, teams and schedules like the built-in four. */
+function MyAgents() {
+  const [list, setList] = useState(() => Object.entries(AGENT_META).filter(([, m]) => m.custom))
+  const [f, setF] = useState({ id: '', label: '', role: '', command: '', timeout: 600, relogin: '' })
+  const [logo, setLogo] = useState<File | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const refresh = async () => { await loadAgents(); setList(Object.entries(AGENT_META).filter(([, m]) => m.custom)) }
+  const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: k === 'timeout' ? +e.target.value : e.target.value })
+  async function add(e: React.FormEvent) {
+    e.preventDefault()
+    if (!/^[a-z][a-z0-9-]{1,23}$/.test(f.id)) { setMsg({ ok: false, text: 'Short id: lowercase letters, digits and dashes, e.g. codex.' }); return }
+    if (!f.label.trim() || !f.role.trim() || !f.command.trim()) { setMsg({ ok: false, text: 'Fill in name, role and command.' }); return }
+    setBusy(true); setMsg({ ok: true, text: 'Testing it: asking it to say hello (up to a few minutes)…' })
+    try {
+      const r = await api.addAgent(f)
+      if (logo) await api.uploadAgentLogo(r.id, logo)
+      await refresh()
+      setMsg({ ok: true, text: `Added ${r.label}. Test answer: "${r.test_answer}"${logo ? '' : r.logo ? ' Logo found automatically.' : ' No logo found online: upload one if you like.'}` })
+      setF({ id: '', label: '', role: '', command: '', timeout: 600, relogin: '' }); setLogo(null)
+    } catch (x) { setMsg({ ok: false, text: (x as Error).message }) } finally { setBusy(false) }
+  }
+  async function findLogo(id: string) {
+    try { await api.findAgentLogo(id); await refresh(); setMsg({ ok: true, text: `Logo found for ${AGENT_META[id].label}.` }) }
+    catch (x) { setMsg({ ok: false, text: (x as Error).message }) }
+  }
+  async function remove(id: string) {
+    if (!confirm(`Remove ${AGENT_META[id].label} from the OS? (The program itself stays installed.)`)) return
+    await api.removeAgent(id); await refresh()
+  }
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-sm font-medium text-ink-2">Your agents</h2>
+        <p className="text-xs text-ink-3">Add any command-line AI agent. It joins Chats, Sessions, Team runs and Schedules. Use its read-only switch: workers here only plan.</p>
+      </div>
+      {list.length > 0 && <ul className="flex flex-col gap-2">
+        {list.map(([id, m]) => (
+          <li key={id} className="flex items-center gap-3 rounded-2xl border border-white bg-white/55 p-3">
+            <AgentLogo name={id} size={36} />
+            <div className="min-w-0 flex-1"><p className="text-sm font-medium text-ink">{m.label}</p><p className="truncate font-mono text-xs text-ink-3">{m.command}</p></div>
+            {!m.logo && <button onClick={() => findLogo(id)} className="min-h-11 cursor-pointer rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white">Find logo</button>}
+            <button onClick={() => remove(id)} className="min-h-11 cursor-pointer rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white">Remove</button>
+          </li>
+        ))}
+      </ul>}
+      <form onSubmit={add} className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-2 text-sm text-ink-2">Quick fill:
+          {PRESETS.map(p => <button type="button" key={p.id} onClick={() => setF({ ...f, ...p })}
+            className="min-h-11 cursor-pointer rounded-full border border-white bg-white/70 px-4 text-ink hover:bg-white">{p.label}</button>)}
+        </div>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          <Field id="ag-id" label="Id"><input id="ag-id" value={f.id} onChange={set('id')} placeholder="codex" className={inputCls} /></Field>
+          <Field id="ag-label" label="Name"><input id="ag-label" value={f.label} onChange={set('label')} placeholder="Codex" className={inputCls} /></Field>
+          <Field id="ag-role" label="Role (one line)"><input id="ag-role" value={f.role} onChange={set('role')} placeholder="Second opinion on code" className={inputCls} /></Field>
+        </div>
+        <Field id="ag-cmd" label="Command" help="The program and its flags. Put {prompt} where the prompt goes, or leave it out to send the prompt on stdin.">
+          <input id="ag-cmd" value={f.command} onChange={set('command')} placeholder="codex exec --sandbox read-only -" className={`${inputCls} font-mono text-sm`} />
+        </Field>
+        <Field id="ag-relogin" label="Re-login command (if it needs a login)" help="Logs it out and back in. It then joins the weekly re-login card above.">
+          <input id="ag-relogin" value={f.relogin} onChange={set('relogin')} placeholder="codex logout && codex login" className={`${inputCls} font-mono text-sm`} />
+        </Field>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Field id="ag-timeout" label="Time limit (seconds)"><input id="ag-timeout" type="number" min={30} max={1800} value={f.timeout} onChange={set('timeout')} className={inputCls} /></Field>
+          <Field id="ag-logo" label="Logo (optional)" help="SVG, PNG, WebP or JPG, up to 300 KB.">
+            <input id="ag-logo" type="file" accept=".svg,.png,.webp,.jpg" onChange={e => setLogo(e.target.files?.[0] ?? null)} className="text-sm text-ink-2" />
+          </Field>
+        </div>
+        {msg && <p role={msg.ok ? 'status' : 'alert'} className={`text-sm ${msg.ok ? 'text-ink-2' : 'text-bad'}`}>{msg.text}</p>}
+        <ChromeButton type="submit" disabled={busy} icon={<Plus size={16} weight="bold" aria-hidden="true" />}>{busy ? 'Testing' : 'Test and add'}</ChromeButton>
+      </form>
     </div>
   )
 }
