@@ -12,15 +12,15 @@ tags: [monitoring, health, system]
 Checks system health at regular intervals: agent status, disk usage, memory pressure, and recent audit errors. Flags anomalies and triggers alerts if thresholds are breached.
 
 ## When to Use
-- Every 5 minutes as a scheduled cron job
+- Every hour as a scheduled cron job
 - On-demand to check system health
 - Before and after running other skills
 
 ## Process
-1. Check all 3 agents (opencode, hermes, agy) are online
+1. Check the agents are available. claude, opencode and agy are command-line tools that only run when asked, so never look for their processes: check each command exists (`where claude`, `where opencode`, `where agy`). Hermes also runs a gateway: check http://127.0.0.1:8642/health answers
 2. Check disk usage (< 90%)
 3. Check memory pressure (< 80%)
-4. Scan recent audit log for errors
+4. Scan recent errors in D:/Work/Claude/agentic-os/audit/audit.log (last 200 lines)
 5. Update brain/recent-decisions.md if issues found
 6. Return health summary
 
@@ -28,5 +28,5 @@ Checks system health at regular intervals: agent status, disk usage, memory pres
 JSON health report with pass/fail per check
 
 ## Agent Assignment
-- Primary: opencode
+- Primary: claude
 - Fallback: hermes

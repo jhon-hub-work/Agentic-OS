@@ -25,9 +25,29 @@ const PLATFORMS: { id: string; label: string; host: RegExp }[] = [
 ]
 const platformOf = (j: JobPost) => PLATFORMS.find(p => p.host.test(j.url))?.id ?? 'other'
 
+// One tab per person the OS job-hunts for: the owner first, then config/owner.json "people". Each has their own board.
 export default function Jobs() {
+  const { data: people } = usePoll(api.jobPeople, 60000)
+  const [who, setWho] = useState('')
+  const list = people ?? [{ id: '', name: 'Me' }]
+  return (
+    <>
+      <div className="mb-6 flex flex-wrap gap-2" role="tablist" aria-label="Whose job search">
+        {list.map(p => (
+          <button key={p.id} role="tab" aria-selected={who === p.id} onClick={() => setWho(p.id)}
+            className={`min-h-12 cursor-pointer rounded-2xl border px-6 text-base font-medium ${who === p.id ? 'border-navy bg-navy text-white' : 'border-white bg-white/60 text-ink-2'}`}>
+            {p.id ? `For ${p.name}` : `For me (${p.name})`}
+          </button>
+        ))}
+      </div>
+      <Board key={who} who={who} person={list.find(p => p.id === who)} />
+    </>
+  )
+}
+
+function Board({ who, person }: { who: string; person?: { name: string; summary?: string } }) {
   const [platform, setPlatform] = useState('all')
-  const { data, error } = usePoll(api.jobsBoard, 5000)
+  const { data, error } = usePoll(() => api.jobsBoard(who), 5000)
   const [tab, setTab] = useState('todo')
   const [starting, setStarting] = useState(false)
   const [link, setLink] = useState('')
@@ -52,13 +72,13 @@ export default function Jobs() {
 
   async function runNow() {
     setStarting(true)
-    try { await api.runJobSearch() } finally { setStarting(false) }
+    try { await api.runJobSearch(who) } finally { setStarting(false) }
   }
 
   return (
     <>
-      <PageHead eyebrow="Jobs" title="Job search"
-        sub="Found on OnlineJobs.ph, company boards and public boards, filtered by Hoot's rules, scored by OpenCode, drafted by Claude. Nothing goes out until you Approve; then the OS applies like Hoot, or hands it to you when only you can finish."
+      <PageHead eyebrow={who ? `Jobs · ${person?.name ?? ''}` : 'Jobs · me'} title={who ? `${person?.name ?? ''}'s job search` : 'Job search'}
+        sub={who ? `Bookkeeping roles on OnlineJobs.ph for ${person?.name ?? ''}: $8/h floor, Australian clients ranked first, same rules as yours. Clean drafts are sent from her own Brave; anything only she can do waits here.` : "Found on OnlineJobs.ph, company boards and public boards, filtered by Hoot's rules, scored by OpenCode, drafted by Claude. Nothing goes out until you Approve; then the OS applies like Hoot, or hands it to you when only you can finish."}
         action={<ChromeButton onClick={runNow} disabled={starting || data?.running} icon={<MagnifyingGlass size={16} weight="bold" aria-hidden="true" />}>{data?.running ? 'Searching' : 'Search now'}</ChromeButton>} />
       {error && <ErrorLine msg={error} />}
       {run && (
@@ -71,15 +91,15 @@ export default function Jobs() {
       )}
       <div className="mb-5 flex flex-wrap items-center gap-2 text-sm">
         <span className="text-ink-3">Export:</span>
-        <a href="/api/jobs/export.xlsx" download className="inline-flex min-h-11 items-center rounded-full border border-white bg-white/70 px-4 text-ink hover:bg-white">Google Sheets (.xlsx)</a>
-        <a href="/api/jobs/export.html" target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center rounded-full border border-white bg-white/70 px-4 text-ink hover:bg-white">PDF</a>
+        <a href={`/api/jobs/export.xlsx?who=${who}`} download className="inline-flex min-h-11 items-center rounded-full border border-white bg-white/70 px-4 text-ink hover:bg-white">Google Sheets (.xlsx)</a>
+        <a href={`/api/jobs/export.html?who=${who}`} target="_blank" rel="noreferrer" className="inline-flex min-h-11 items-center rounded-full border border-white bg-white/70 px-4 text-ink hover:bg-white">PDF</a>
       </div>
-      <form onSubmit={addLink} className="mb-5 flex flex-wrap items-center gap-2">
+      {!who && <form onSubmit={addLink} className="mb-5 flex flex-wrap items-center gap-2">
         <input value={link} onChange={e => setLink(e.target.value)} placeholder="Paste an Indeed job link"
           aria-label="Indeed job link" className="min-w-0 flex-1 rounded-full border border-white bg-white/55 px-4 py-2 text-sm text-ink" />
         <ChromeButton type="submit" disabled={adding || !link.trim()}>{adding ? 'Adding' : 'Add'}</ChromeButton>
         {addMsg && <p className="w-full text-xs text-ink-3">{addMsg}</p>}
-      </form>
+      </form>}
       <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Platform">
         {groups.map(p => (
           <button key={p.id} role="tab" aria-selected={platform === p.id} onClick={() => setPlatform(p.id)}
@@ -102,16 +122,16 @@ export default function Jobs() {
       {!data ? <Skeleton className="h-48" /> : rows.length === 0 ? (
         <Panel><Empty title="Nothing here" hint={data.running ? 'A search is running now.' : 'Run a search, or wait for the daily one.'} /></Panel>
       ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{rows.map(j => <JobCard key={j.id} j={j} />)}</div>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">{rows.map(j => <JobCard key={j.id} j={j} who={who} />)}</div>
       )}
     </>
   )
 }
 
-function JobCard({ j }: { j: JobPost }) {
+function JobCard({ j, who }: { j: JobPost; who: string }) {
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
-  const act = async (d: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') => { setBusy(true); try { await api.decideJob(j.id, d) } finally { setBusy(false) } }
+  const act = async (d: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') => { setBusy(true); try { await api.decideJob(j.id, d, who) } finally { setBusy(false) } }
   const copy = async (t = j.draft) => { await navigator.clipboard.writeText(t); setCopied(true); setTimeout(() => setCopied(false), 1500) }
   const btn = 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:opacity-50'
   return (

@@ -9,6 +9,7 @@ export const spring = { type: 'spring', bounce: 0, duration: 0.4 } as const
 export function usePoll<T>(load: () => Promise<T>, ms = 5000) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [n, setN] = useState(0)  // bumped by reload() to fetch now instead of waiting for the next tick
   useEffect(() => {
     let alive = true
     const tick = () => load().then(d => { if (alive) { setData(d); setError(null) } })
@@ -16,8 +17,8 @@ export function usePoll<T>(load: () => Promise<T>, ms = 5000) {
     tick()
     const t = setInterval(tick, ms)
     return () => { alive = false; clearInterval(t) }
-  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
-  return { data, error }
+  }, [n])  // eslint-disable-line react-hooks/exhaustive-deps
+  return { data, error, reload: () => setN(x => x + 1) }
 }
 
 export function Panel({ children, className = '', inner = '' }: { children: ReactNode; className?: string; inner?: string }) {

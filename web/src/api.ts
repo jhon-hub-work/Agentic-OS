@@ -7,8 +7,11 @@ export type TeamStep = { agent: AgentName; task: string; output: string; handoff
 export type Thread = { id: string; message: string; start_agent: AgentName; status: 'running' | 'done'; active: AgentName | null; steps: TeamStep[]; created: string }
 
 export type ChatMsg = { id: string; role: 'user' | 'assistant'; agent: AgentName; content: string; timestamp: string }
-export type SessionMsg = { role: 'user' | 'agent'; agent: AgentName | null; round: number; content: string; timestamp: string }
-export type Session = { id: string; title: string; agents: AgentName[]; rounds: number; round: number; status: 'running' | 'idle'; working: AgentName[]; messages: SessionMsg[]; created: string }
+export type ToolStep = { tool: string; toolCallId: string; label?: string; emoji?: string; status: 'running' | 'completed' | string }
+export type ChatContext = { used: number; window: number | null }
+export type StreamEvent = ({ type: 'context' } & ChatContext) | { type: 'text'; text: string } | ({ type: 'tool' } & ToolStep) | { type: 'error'; error: string } | { type: 'cleared' } | { type: 'done'; message: ChatMsg }
+export type SessionMsg = { role: 'user' | 'agent'; agent: AgentName | null; round: number; content: string; timestamp: string; prompt_tokens?: number }
+export type Session = { id: string; title: string; agents: AgentName[]; rounds: number; round: number; status: 'running' | 'idle'; working: AgentName[]; messages: SessionMsg[]; created: string; pinned?: boolean; read?: boolean; section?: string; archived?: boolean }
 export type Job = { id: string; name: string; kind: 'agent' | 'team' | 'skill'; agent: AgentName; prompt: string; skill?: string | null; cron: string; enabled: boolean; last_run: string | null; description?: string }
 export type JobEvent = { type: string; job_id?: string; name?: string; output?: string; trigger?: string; timestamp: string }
 
@@ -33,9 +36,31 @@ export const api = {
     req<{ output: string; agent: string }>(`/api/skills/${encodeURIComponent(name)}/run`, { method: 'POST', body: JSON.stringify({ input, agent }) }),
   chatHistory: (agent: AgentName) => req<{ messages: ChatMsg[] }>(`/api/chat/history?agent=${agent}&limit=100`),
   chat: (agent: AgentName, message: string) => req<{ response: ChatMsg }>('/api/chat', { method: 'POST', body: JSON.stringify({ agent, message }) }),
+  chatMeta: (agent: AgentName) => req<{ context: ChatContext | null; commands: string[]; live: boolean }>(`/api/chat/meta?agent=${agent}`),
+  // Live reply: words and tool steps arrive as server-sent events (Hermes and Claude Code)
+  chatStream: async (agent: AgentName, message: string, on: (e: StreamEvent) => void) => {
+    const r = await fetch('/api/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent, message }) })
+    if (!r.ok || !r.body) throw new Error((await r.json().catch(() => ({}))).detail || `Request failed (${r.status})`)
+    const reader = r.body.pipeThrough(new TextDecoderStream()).getReader()
+    let buf = ''
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) return
+      buf += value
+      let i
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2)
+        if (chunk.startsWith('data: ')) on(JSON.parse(chunk.slice(6)))
+      }
+    }
+  },
   sessions: () => req<{ sessions: Session[] }>('/api/sessions'),
   startSession: (message: string, agents: AgentName[], rounds: number) =>
     req<Session>('/api/sessions', { method: 'POST', body: JSON.stringify({ message, agents, rounds }) }),
+  patchSession: (id: string, p: Partial<Pick<Session, 'title' | 'pinned' | 'read' | 'section' | 'archived'>>) =>
+    req<Session>(`/api/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  forkSession: (id: string) => req<Session>(`/api/sessions/${id}/fork`, { method: 'POST' }),
+  deleteSession: (id: string) => req<{ deleted: string }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   sessionMessage: (id: string, message: string) => req<Session>(`/api/sessions/${id}/message`, { method: 'POST', body: JSON.stringify({ message }) }),
   jobs: () => req<Job[]>('/api/scheduler/jobs'),
   createJob: (job: Partial<Job>) => req<Job>('/api/scheduler/jobs', { method: 'POST', body: JSON.stringify(job) }),
@@ -51,11 +76,12 @@ export const api = {
   models: (agent: 'claude' | 'opencode') => req<{ models: string[]; current: string }>(`/api/models/${agent}`),
   settings: () => req<{ models?: Record<string, string> }>('/api/settings'),
   saveModels: (models: Record<string, string>) => req<unknown>('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { models } }) }),
-  jobsBoard: () => req<{ jobs: JobPost[]; runs: JobRun[]; running: boolean }>('/api/jobs'),
-  runJobSearch: () => req<unknown>('/api/jobs/run', { method: 'POST' }),
+  jobPeople: () => req<{ id: string; name: string; summary?: string }[]>('/api/jobs/people'),
+  jobsBoard: (who = '') => req<{ jobs: JobPost[]; runs: JobRun[]; running: boolean }>(`/api/jobs?who=${who}`),
+  runJobSearch: (who = '') => req<unknown>(`/api/jobs/run?who=${who}`, { method: 'POST' }),
   addIndeedJob: (url: string) => req<JobPost>('/api/jobs/add', { method: 'POST', body: JSON.stringify({ url }) }),
-  decideJob: (id: string, decision: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') =>
-    req<JobPost>(`/api/jobs/${id}/decision`, { method: 'POST', body: JSON.stringify({ decision }) }),
+  decideJob: (id: string, decision: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up', who = '') =>
+    req<JobPost>(`/api/jobs/${id}/decision?who=${who}`, { method: 'POST', body: JSON.stringify({ decision }) }),
   threads: () => req<{ threads: Thread[] }>('/api/team'),
   thread: (id: string) => req<Thread>(`/api/team/${id}`),
   startTeam: (message: string, agent: AgentName) => req<Thread>('/api/team', { method: 'POST', body: JSON.stringify({ message, agent }) }),
@@ -67,6 +93,8 @@ export const AGENT_META: Record<AgentName, { label: string; role: string }> = {
   hermes: { label: 'Hermes', role: 'Schedules and your phone' },
   agy: { label: 'agy', role: 'Web research' },
 }
+
+export const fmtTokens = (n: number) => n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`
 
 export const timeAgo = (iso: string) => {
   const s = (Date.now() - new Date(iso).getTime()) / 1000

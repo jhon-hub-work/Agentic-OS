@@ -221,7 +221,7 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
     <div className="mx-auto flex w-full max-w-3xl flex-col items-center gap-4 px-4">
       <AnimatePresence mode="wait">
         <motion.p key={line} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -4 }} transition={spring}
-          aria-live="polite" title={subtitle} className="line-clamp-3 text-center text-[17px] leading-relaxed text-ink [text-shadow:0_1px_12px_var(--color-ice)]">
+          aria-live="polite" className="max-h-[38vh] overflow-y-auto whitespace-pre-line text-center text-[17px] leading-relaxed text-ink [text-shadow:0_1px_12px_var(--color-ice)]">
           {line || 'Tap the mic and talk to me.'}
         </motion.p>
       </AnimatePresence>

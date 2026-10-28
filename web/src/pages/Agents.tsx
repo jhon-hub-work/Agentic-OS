@@ -14,6 +14,7 @@ export default function Agents() {
   return (
     <>
       <PageHead eyebrow="Agents & tools" title="Models and connections" sub="Choose each agent's model, and connect MCP servers (tools like Notion, GitHub, a database) to the agents that should use them." />
+      <Panel className="mb-5"><Relogin /></Panel>
       <Panel className="mb-5"><Models /></Panel>
       <Panel className="mb-5"><AddConnection onAdded={load} /></Panel>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
@@ -107,5 +108,39 @@ function AddConnection({ onAdded }: { onAdded: () => void }) {
       )}
       <div><ChromeButton type="submit" disabled={busy} icon={<Plus size={16} weight="bold" aria-hidden="true" />}>{busy ? 'Connecting' : 'Connect'}</ChromeButton></div>
     </form>
+  )
+}
+
+type Login = { id: string; label: string; last: string; due: string; overdue: boolean }
+
+// Weekly re-login for security: a button opens a terminal on the PC that logs the account out and starts its login.
+function Relogin() {
+  const [accounts, setAccounts] = useState<Login[] | null>(null)
+  const [msg, setMsg] = useState<string | null>(null)
+  const post = (path: string) => fetch(path, { method: 'POST' }).then(r => r.json())
+  useEffect(() => { fetch('/api/reauth').then(r => r.json()).then(d => setAccounts(d.accounts)).catch(() => {}) }, [])
+  const day = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })
+  return (
+    <div>
+      <h2 className="mb-1 text-lg font-medium tracking-tight text-ink">Weekly re-login</h2>
+      <p className="mb-4 text-sm text-ink-3">For security, log out and back in once a week. Tasks using that account pause until you finish logging in.</p>
+      {!accounts ? <Skeleton className="h-16" /> : (
+        <ul className="flex flex-col gap-3">
+          {accounts.map(a => (
+            <li key={a.id} className="flex flex-wrap items-center gap-3 rounded-2xl border border-white bg-white/50 px-4 py-3">
+              <span className="font-medium text-ink">{a.label}</span>
+              <span className={`text-xs ${a.overdue ? 'text-bad' : 'text-ink-3'}`}>{a.overdue ? `Due since ${day(a.due)}` : `Next: ${day(a.due)}`} · last {day(a.last)}</span>
+              <span className="ml-auto flex gap-2">
+                <button type="button" onClick={() => post(`/api/reauth/${a.id}/start`).then(() => setMsg(`A window opened on the PC for ${a.label}. Log in there, then tap Done.`))}
+                  className="chrome min-h-10 cursor-pointer rounded-full px-4 text-sm font-medium">Log out &amp; in</button>
+                <button type="button" onClick={() => post(`/api/reauth/${a.id}/done`).then(d => { setAccounts(d.accounts); setMsg(null) })}
+                  className="min-h-10 cursor-pointer rounded-full border border-white bg-white/60 px-4 text-sm text-ink hover:bg-white">Done</button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {msg && <p role="status" className="mt-3 text-sm text-ink-2">{msg}</p>}
+    </div>
   )
 }

@@ -95,7 +95,7 @@ export default function App() {
         </nav>
       </aside>
 
-      <main id="main" className={focus ? 'px-4 pb-32 pt-8 md:pb-8 md:pt-8' : 'mx-auto max-w-[1200px] px-4 pb-32 pt-8 md:pb-12 md:pl-72 md:pr-8 md:pt-12'}>
+      <main id="main" className={focus ? 'px-4 pb-32 pt-8 md:pb-8 md:pt-8' : `mx-auto ${page === 'sessions' || page === 'chats' ? 'max-w-[1760px]' : 'max-w-[1200px]'} px-4 pb-32 pt-8 md:pb-12 md:pl-72 md:pr-8 md:pt-12`}>
         <AnimatePresence mode="wait">
           <motion.div key={page} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -6, transition: { duration: 0.15 } }} transition={spring}>
             {page === 'home' && <Home />}

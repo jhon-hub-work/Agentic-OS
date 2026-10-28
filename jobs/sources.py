@@ -17,6 +17,11 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
+try:
+    from . import lanes
+except ImportError:  # run as a script (python jobs/sources.py)
+    import lanes
+
 UA = "windows:hoot-job-agent:1.0 (personal job search)"     # Reddit blocks generic agents
 MAX_AGE_DAYS = 14
 PER_SOURCE = 40
@@ -56,7 +61,8 @@ def _fresh(when) -> bool:
 
 
 def _relevant(title: str) -> bool:
-    return bool(VIDEO_T.search(title or "") or AI_T.search(title or ""))
+    return bool(VIDEO_T.search(title or "") or AI_T.search(title or "") or lanes.DEV.search(title or "")
+                or lanes.SOCIAL.search(title or ""))
 
 
 def _offer(source, url, company, title, location, jd, pay=""):

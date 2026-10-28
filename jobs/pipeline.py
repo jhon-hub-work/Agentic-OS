@@ -66,9 +66,19 @@ def save(path: Path, data) -> None:
     tmp.replace(path)
 
 
+# Jhon, 2026-10-28: (hourly, monthly) floors in USD per lane; other lanes use config/owner.json below.
+LANE_PAY = {"dev": (10, 1600), "social": (8, 0)}
+
+
 def pay_ok(job: dict) -> bool:
     """Pay floors from config/owner.json: hourly (lower on OnlineJobs.ph), monthly, and per clip."""
     jd = job.get("jd") or ""
+    lane = lanes.kind_of(job.get("title"))
+    if lane in LANE_PAY:
+        hourly, monthly = LANE_PAY[lane]
+        h = pay.hourly_usd(job.get("pay") or "", jd, minimum=hourly)
+        # "$1600 a month OR $10 an hour": a monthly figure is judged by the monthly floor only
+        return (h["ok"] or (monthly and "(monthly" in h["basis"])) and pay.monthly_floor_ok(job.get("pay") or "", jd, minimum=monthly)
     piece = pay.per_piece_low(jd)
     floor = pay.MIN_HOURLY_USD if "onlinejobs.ph" in (job.get("url") or "") else pay.MIN_HOURLY_OTHER_USD  # $8 OLJ, $15 elsewhere
     return (pay.hourly_usd(job.get("pay") or "", jd, minimum=floor)["ok"]
@@ -329,9 +339,9 @@ EXPORT_COLS = ("platform", "title", "company", "status", "score", "pay", "found"
                "replied_at", "apply_result", "url")
 
 
-def export_rows() -> list:
+def export_rows(path: Path = BOARD) -> list:
     return [{c: platform(j.get("url")) if c == "platform" else j.get(c, "") for c in EXPORT_COLS}
-            for j in load(BOARD, {"jobs": []})["jobs"]]
+            for j in load(path, {"jobs": []})["jobs"]]
 
 
 APPROVABLE = ("drafted", "needs_you", "handoff")  # approving twice, or while applying, would send twice
@@ -341,40 +351,40 @@ class StateError(Exception):
     pass
 
 
-def decide(jid: str, decision: str) -> dict:
+def decide(jid: str, decision: str, path: Path = BOARD) -> dict:
     """approve / skip / applied. Approving starts the apply step (server.apply_approved)."""
     if decision in ("replied", "followed_up"):  # tracking marks from the owner; status stays readable in exports
         with BOARD_LOCK:
-            board = load(BOARD, {"jobs": [], "runs": []})
+            board = load(path, {"jobs": [], "runs": []})
             for j in board["jobs"]:
                 if j["id"] == jid:
                     j.update({"status": "replied", "replied_at": now()} if decision == "replied"
                              else {"followed_up_at": now(), "follow_up": "done"})
-                    save(BOARD, board)
+                    save(path, board)
                     return j
         raise KeyError(jid)
     if decision not in ("approve", "skip", "applied"):
         raise ValueError("decision must be approve, skip or applied")
     with BOARD_LOCK:
-        board = load(BOARD, {"jobs": [], "runs": []})
+        board = load(path, {"jobs": [], "runs": []})
         for j in board["jobs"]:
             if j["id"] == jid:
                 if decision == "approve" and j["status"] not in APPROVABLE:
                     raise StateError(f"can't approve a job that is {j['status']}")
                 j["status"] = {"approve": "approved", "skip": "skipped", "applied": "applied"}[decision]
                 j["decided"] = now()
-                save(BOARD, board)
+                save(path, board)
                 return j
     raise KeyError(jid)
 
 
-def set_fields(jid: str, **fields) -> None:
+def set_fields(jid: str, path: Path = BOARD, **fields) -> None:
     with BOARD_LOCK:
-        board = load(BOARD, {"jobs": [], "runs": []})
+        board = load(path, {"jobs": [], "runs": []})
         for j in board["jobs"]:
             if j["id"] == jid:
                 j.update(fields)
-        save(BOARD, board)
+        save(path, board)
 
 
 def _selftest():
@@ -386,6 +396,12 @@ def _selftest():
         assert leaks(f"{first} is my client " + "x" * 80) == "names the clinic client"
     assert not pay_ok({"pay": "$5/hr", "jd": ""}) and pay_ok({"pay": "", "jd": ""})
     assert pay_ok({"pay": "$10/hr", "jd": "", "url": "https://www.onlinejobs.ph/jobseekers/job/x"}) and not pay_ok({"pay": "$10/hr", "jd": ""})
+    fs, sm = {"title": "Full Stack Developer"}, {"title": "Social Media Manager"}
+    head = lambda w, kind="Full Time": f"Type Of Work: {kind}\nWage / Salary: {w}\n"
+    assert pay_ok({**fs, "jd": head("$1600 / month")}) and not pay_ok({**fs, "jd": head("$1200 / month")})
+    assert pay_ok({**fs, "pay": "$12/hr", "jd": ""}) and not pay_ok({**fs, "pay": "$9/hr", "jd": ""})
+    assert pay_ok({**sm, "pay": "$8/hr", "jd": ""}) and not pay_ok({**sm, "pay": "$6/hr", "jd": ""})
+    assert not pay_ok({**sm, "jd": head("$1000 / month")}) and pay_ok({**sm, "jd": head("$1500 / month")})
     assert same_job({"company": "Pavago", "title": "Video Editor"}) == same_job({"company": "pavago", "title": "Video  Editor!"})
     print("pipeline selftest ok")
 

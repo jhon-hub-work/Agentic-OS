@@ -33,3 +33,13 @@ web/node_modules/
 web/dist/
 config/owner.json
 config/gmail.json
+
+# runtime state from the 28 Oct chat/ticket/re-login work (personal, never public)
+data/chat-archive.jsonl
+data/chat-context.json
+data/claude-commands.json
+data/*-chat-session
+data/reauth.json
+data/tickets/
+data/sessions/_deleted/
+data/scheduler-history.torn-*.json

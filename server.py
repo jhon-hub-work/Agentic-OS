@@ -15,7 +15,9 @@ import tarfile
 import threading
 
 import owner
+from jobs import people, pipeline
 import time
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,7 +28,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -45,6 +47,9 @@ async def lifespan(app: FastAPI):
         print("Event-driven scheduler started")
     except Exception as e:
         print(f"Scheduler not available: {e}")
+    threading.Thread(target=hermes_gateway_ensure, daemon=True).start()  # Hermes's API, cron and phone chat stay up with the OS
+    threading.Thread(target=skill_sync_loop, daemon=True).start()  # plugin upgrades move skill folders; keep agents pointed at them
+    threading.Thread(target=ticket_worker_loop, daemon=True).start()  # Claude picks tickets up by severity
     yield
     if _scheduler_instance:
         try:
@@ -55,7 +60,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Agentic OS", version="4.0", lifespan=lifespan)
 
 # Load OpenRouter API key from Hermes .env
-HERMES_ENV = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) / ".env"
+HERMES_ENV = Path(os.environ.get("HERMES_HOME") or owner.OWNER.get("hermes_home") or str(Path.home() / ".hermes")) / ".env"
 if HERMES_ENV.exists():
     for line in HERMES_ENV.read_text().splitlines():
         line = line.strip()
@@ -543,13 +548,14 @@ def mark_interrupted_runs():
                 run["interrupted"] = True
                 f.write_text(json.dumps(run, indent=2))
     from jobs import pipeline  # an apply killed by a restart (or still waiting its turn) would never be approvable again
-    with pipeline.BOARD_LOCK:
-        board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
-        stuck = [j for j in board["jobs"] if j["status"] in ("approved", "applying")]
-        for j in stuck:
-            j.update(status="handoff", apply_result="interrupted by a restart")
-        if stuck:
-            pipeline.save(pipeline.BOARD, board)
+    for path in [pipeline.BOARD] + [people.board(pid) for pid in people.PEOPLE]:
+        with pipeline.BOARD_LOCK:
+            board = pipeline.load(path, {"jobs": [], "runs": []})
+            stuck = [j for j in board["jobs"] if j["status"] in ("approved", "applying")]
+            for j in stuck:
+                j.update(status="handoff", apply_result="interrupted by a restart")
+            if stuck:
+                pipeline.save(path, board)
 
 def handle_scheduler_event(event: dict):
     if event.get("type") == "job_run":
@@ -593,13 +599,47 @@ def run_job_pipeline() -> dict:
                              after=auto_apply_clean if owner.OWNER.get("auto_apply") else None)
         stats["followed_up"] = run_followups()
         append_audit({"action": "jobs_run", "output_preview": f"{stats['drafted']} drafted, {stats['auto_sent']} sent, {stats['followed_up']} followed up, {stats['needs_you']} need {owner.NAME}"})
+        for pid in people.PEOPLE:  # the daily run covers everyone; each person keeps their own board
+            stats.setdefault("people", {})[pid] = _run_person(pid)
         return stats
     finally:
         _jobs_lock.release()
 
+def _run_person(pid: str) -> dict:
+    """One person's search, then their clean drafts go out from their own Brave (config/owner.json people.<id>)."""
+    try:
+        stats = people.run(pid, execute_agent, log=lambda m: print(f"[jobs:{pid}] {m}"))
+        stats["auto_sent"] = auto_apply_clean(pid) if people.PEOPLE[pid].get("auto_apply") else 0
+    except Exception as e:  # noqa: BLE001 - one person's run must not stop the others
+        return {"errors": [f"run failed: {e!r}"]}
+    append_audit({"action": "jobs_run", "who": pid, "output_preview": f"{stats['drafted']} drafted, {stats['auto_sent']} sent"})
+    return stats
+
+def run_person_pipeline(pid: str) -> dict:
+    if not _jobs_lock.acquire(blocking=False):
+        return {"skipped": "a job run is already going"}
+    try:
+        return _run_person(pid)
+    finally:
+        _jobs_lock.release()
+
+def board_path(who: str):
+    """'' is the owner's board; any other id is someone in config/owner.json "people"."""
+    if not who:
+        return pipeline.BOARD
+    if who not in people.PEOPLE:
+        raise HTTPException(404, "no such person")
+    return people.board(who)
+
+@app.get("/api/jobs/people")
+def jobs_people():
+    return [{"id": "", "name": owner.NAME}] + [{"id": k, "name": v["name"], "summary": v.get("profile_summary", "")}
+                                                for k, v in people.PEOPLE.items()]
+
 @app.post("/api/jobs/run")
-def jobs_run():
-    threading.Thread(target=run_job_pipeline, daemon=True).start()
+def jobs_run(who: str = ""):
+    board_path(who)
+    threading.Thread(target=run_person_pipeline if who else run_job_pipeline, args=(who,) if who else (), daemon=True).start()
     return {"status": "started"}
 
 @app.post("/api/jobs/add")
@@ -626,39 +666,36 @@ def open_link(data: dict, request: Request):
     return {"opened": url}
 
 @app.get("/api/jobs/export.xlsx")
-def jobs_export_xlsx():
+def jobs_export_xlsx(who: str = ""):
     """Every job and where it stands, formatted (table, colours, Status dropdown); opens in Google Sheets."""
-    from jobs import export_xlsx, pipeline
-    data = export_xlsx.build(pipeline.load(pipeline.BOARD, {"jobs": []})["jobs"])
+    from jobs import export_xlsx
+    data = export_xlsx.build(pipeline.load(board_path(who), {"jobs": []})["jobs"])
     return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"Content-Disposition": f'attachment; filename="jobs-{datetime.now():%Y-%m-%d}.xlsx"'})
 
 @app.get("/api/jobs/export.html")
-def jobs_export_print():
+def jobs_export_print(who: str = ""):
     """The same table as a print page: the browser's Print > Save as PDF makes the PDF."""
     import html as h
-    from jobs import pipeline
     cols = ("platform", "title", "company", "status", "score", "applied_at", "followed_up_at", "replied_at")
     rows = "".join("<tr>" + "".join(f"<td>{h.escape(str(r[c] or '')[:16] if c.endswith('_at') else str(r[c] or ''))}</td>" for c in cols)
-                   + "</tr>" for r in pipeline.export_rows())
+                   + "</tr>" for r in pipeline.export_rows(board_path(who)))
     head = "".join(f"<th>{c.replace('_at', '').replace('_', ' ')}</th>" for c in cols)
     return HTMLResponse(f"""<!doctype html><meta charset="utf-8"><title>Jobs {datetime.now():%Y-%m-%d}</title>
 <style>body{{font:12px system-ui;margin:24px}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:4px 6px;text-align:left}}th{{background:#eee}}</style>
 <h2>Job applications, {datetime.now():%d %b %Y}</h2><table><tr>{head}</tr>{rows}</table><script>print()</script>""")
 
 @app.get("/api/jobs")
-def jobs_board():
-    from jobs import pipeline
-    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+def jobs_board(who: str = ""):
+    board = pipeline.load(board_path(who), {"jobs": [], "runs": []})
     board["running"] = _jobs_lock.locked() or _apply_lock.locked()
     return board
 
 @app.post("/api/jobs/{jid}/decision")
-def jobs_decision(jid: str, data: dict):
-    from jobs import pipeline
+def jobs_decision(jid: str, data: dict, who: str = ""):
     validate_identifier(jid, r"^[a-f0-9]{10}$", "job id")
     try:
-        job = pipeline.decide(jid, str(data.get("decision", "")))
+        job = pipeline.decide(jid, str(data.get("decision", "")), board_path(who))
     except KeyError:
         raise HTTPException(404, "Job not found")
     except pipeline.StateError as e:
@@ -667,24 +704,24 @@ def jobs_decision(jid: str, data: dict):
         raise HTTPException(400, str(e))
     append_audit({"action": "job_decision", "job": job["title"], "decision": job["status"]})
     if job["status"] == "approved":  # the owner's Approve is the go-ahead: submit it the way Hoot does
-        threading.Thread(target=apply_approved, args=(jid,), daemon=True).start()
+        threading.Thread(target=apply_approved, args=(jid, who), daemon=True).start()
     return job
 
 HOOT_PYTHON = os.environ.get("HOOT_PYTHON", owner.OWNER.get("system_python") or "python")
 _apply_lock = threading.Lock()  # one apply at a time (one Brave), manual Approves and auto_apply alike
 
-def apply_approved(jid: str):
-    """Run jobs/apply_runner.py (system Python has Playwright) and record the outcome on the board."""
+def apply_approved(jid: str, who: str = ""):
+    """Run jobs/apply_runner.py (person_send.py for someone else; system Python has Playwright), record the outcome."""
     with _apply_lock:
-        return _apply_approved(jid)
+        return _apply_approved(jid, who)
 
-def run_apply_runner(job: dict) -> dict:
+def run_apply_runner(job: dict, script: str = "apply_runner.py") -> dict:
     """jobs/apply_runner.py on one job (system Python has Playwright); always one result dict. Hold _apply_lock."""
     import tempfile
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as f:
         json.dump(job, f)
     try:
-        r = subprocess.run([HOOT_PYTHON, str(BASE_DIR / "jobs" / "apply_runner.py"), f.name], capture_output=True,
+        r = subprocess.run([HOOT_PYTHON, str(BASE_DIR / "jobs" / script), f.name], capture_output=True,
                            text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=1200,
                            env={k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")})
         return json.loads((r.stdout or "").strip().splitlines()[-1])
@@ -715,36 +752,36 @@ def run_followups() -> int:
             pipeline.set_fields(j["id"], follow_up="due", followup_draft=text, followup_problem=res.get("reason", ""))
     return sent
 
-def _apply_approved(jid: str):
-    from jobs import pipeline
-    board = pipeline.load(pipeline.BOARD, {"jobs": [], "runs": []})
+def _apply_approved(jid: str, who: str = ""):
+    path = board_path(who)
+    board = pipeline.load(path, {"jobs": [], "runs": []})
     job = next((j for j in board["jobs"] if j["id"] == jid), None)
     if not job:
         return
-    pipeline.set_fields(jid, status="applying")
-    res = run_apply_runner(job)
+    pipeline.set_fields(jid, path, status="applying")
+    res = run_apply_runner({**job, "person": who}, "person_send.py") if who else run_apply_runner(job)
     status = {"submitted": "applied", "closed": "closed"}.get(res.get("outcome"), "handoff")
-    pipeline.set_fields(jid, status=status, apply_result=res.get("reason") or res.get("outcome"), applied_at=pipeline.now())
-    append_audit({"action": "job_apply", "job": job["title"], "output_preview": f"{status}: {res.get('reason', '')}"[:100]})
+    pipeline.set_fields(jid, path, status=status, apply_result=res.get("reason") or res.get("outcome"), applied_at=pipeline.now())
+    append_audit({"action": "job_apply", "who": who, "job": job["title"], "output_preview": f"{status}: {res.get('reason', '')}"[:100]})
     return status
 
-def auto_apply_clean() -> int:
+def auto_apply_clean(who: str = "") -> int:
     """owner.json auto_apply: drafts answerable from the CV, answers and profile go out without a tap, one at a
     time (one Brave). Voice/video recordings, test tasks and calls move to needs_you for the owner."""
-    from jobs import pipeline
+    path = board_path(who)
     sent = 0
-    for j in pipeline.load(pipeline.BOARD, {"jobs": []})["jobs"]:
+    for j in pipeline.load(path, {"jobs": []})["jobs"]:
         if j["status"] != "drafted" and "signed out" not in str(j.get("apply_result") or ""):
             continue  # an OnlineJobs send that failed only because Brave was signed out is retried
         why = pipeline.needs_owner(j)
         if why:
-            pipeline.set_fields(j["id"], status="needs_you", needs_you=True, needs_why=why)
+            pipeline.set_fields(j["id"], path, status="needs_you", needs_you=True, needs_why=why)
             continue
         try:
-            pipeline.decide(j["id"], "approve")
+            pipeline.decide(j["id"], "approve", path)
         except pipeline.StateError:  # the owner skipped it or it is already going
             continue
-        sent += apply_approved(j["id"]) == "applied"
+        sent += apply_approved(j["id"], who) == "applied"
     return sent
 
 _jharvis_seen = {"at": 0.0}
@@ -786,6 +823,63 @@ def jharvis_panel_close(pid: str):
         panels = [] if pid == "all" else [x for x in _panels() if x["id"] != pid]
         write_atomic(JHARVIS_PANELS, json.dumps(panels, indent=2))
     return {"status": "closed"}
+
+# Jharvis asks before a gated action in a dashboard chat (like his Slack Approve/Deny buttons); Jhon answers on the home page.
+JHARVIS_APPROVALS = BASE_DIR / "data" / "jharvis" / "approvals.json"
+
+class JharvisApprovalAsk(BaseModel):
+    tool: str
+    args: dict = {}
+
+class JharvisApprovalDecision(BaseModel):
+    approve: bool
+
+def _approvals() -> list:
+    return json.loads(JHARVIS_APPROVALS.read_text()) if JHARVIS_APPROVALS.exists() else []
+
+@app.post("/api/jharvis/approvals")
+def jharvis_approval_ask(a: JharvisApprovalAsk):
+    item = {"id": uuid.uuid4().hex[:10], "tool": a.tool[:80], "args": a.args, "status": "pending", "asked": get_timestamp()}
+    with _msgs_lock:
+        write_atomic(JHARVIS_APPROVALS, json.dumps((_approvals() + [item])[-50:], indent=2))
+    return item
+
+@app.get("/api/jharvis/approvals")
+def jharvis_approvals(status: str = "pending"):
+    return {"approvals": [a for a in _approvals() if a["status"] == status]}
+
+@app.get("/api/jharvis/approvals/{aid}")
+def jharvis_approval(aid: str):
+    a = next((a for a in _approvals() if a["id"] == aid), None)
+    if not a:
+        raise HTTPException(404, "No such request")
+    return a
+
+@app.post("/api/jharvis/approvals/{aid}")
+def jharvis_approval_decide(aid: str, d: JharvisApprovalDecision):
+    """Approve or Deny from the home page; a request that timed out or was answered stays as it is."""
+    with _msgs_lock:
+        items = _approvals()
+        a = next((a for a in items if a["id"] == aid), None)
+        if not a:
+            raise HTTPException(404, "No such request")
+        if a["status"] != "pending":
+            raise HTTPException(409, f"Already {a['status']}")
+        a.update(status="approved" if d.approve else "denied", decided=get_timestamp())
+        write_atomic(JHARVIS_APPROVALS, json.dumps(items, indent=2))
+    append_audit({"action": "jharvis_approval", "agent": "jharvis", "msg_preview": f"{a['status']}: {a['tool']}"})
+    return a
+
+@app.post("/api/jharvis/approvals/{aid}/expire")
+def jharvis_approval_expire(aid: str):
+    """Jharvis gave up waiting: the card goes away and a late click can't approve it."""
+    with _msgs_lock:
+        items = _approvals()
+        for a in items:
+            if a["id"] == aid and a["status"] == "pending":
+                a["status"] = "expired"
+        write_atomic(JHARVIS_APPROVALS, json.dumps(items, indent=2))
+    return {"status": "expired"}
 
 STT_PYTHON = os.environ.get("JHARVIS_PYTHON", "C:/Users/Admin-PC/Documents/Jharvis/.venv/Scripts/python.exe")
 
@@ -879,9 +973,10 @@ def jharvis_home():
              "detail": "These sites need you to submit (no form I can fill). Open each, paste the draft, then tap I applied. "
                        + ", ".join(f"{j['company']}" for j in approved[:4]) + ".",
              "action": "Submit them", "link": "#/jobs"}] if approved else [])
+        + ticket_needs() + reauth_needs()
     )
     # quick wins first: approving drafts, then submitting approved ones; needs-you is real work
-    items.sort(key=lambda i: {"problem": 0, "drafts": 1, "approved": 2, "needs_you": 3}[i["kind"]])
+    items.sort(key=lambda i: {"problem": 0, "ticket": 1, "reauth": 2, "drafts": 3, "approved": 4, "needs_you": 5}[i["kind"]])
     blanks = sum("[ADD" in (j.get("draft") or "") for j in drafts)
     suggestion = ("Add the answers the drafts keep asking for (like US hours) to your standing answers once; future drafts stop asking."
                   if blanks >= 2 else "All clear. I'll message you in Slack when something needs you.")
@@ -1329,6 +1424,16 @@ def save_chat_message(msg: dict):
             history["messages"] = history["messages"][-200:]
         write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
 
+def clear_chat(agent: str):
+    """Takes an agent's messages off its thread; they're appended to data/chat-archive.jsonl, not deleted."""
+    with _chat_lock:
+        history = load_chat_history()
+        gone = [m for m in history.get("messages", []) if m.get("agent") == agent]
+        with open(CHAT_HISTORY_FILE.with_name("chat-archive.jsonl"), "a", encoding="utf-8") as f:
+            f.writelines(json.dumps(m) + "\n" for m in gone)
+        history["messages"] = [m for m in history.get("messages", []) if m.get("agent") != agent]
+        write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
+
 def resolve_cli(name: str) -> str:
     # npm gives opencode a .cmd wrapper, which would pass the message through cmd.exe parsing; call the real exe.
     if name == "opencode":
@@ -1538,6 +1643,272 @@ def chat(req: ChatRequest):
 
     return {"status": "ok", "response": agent_msg}
 
+# ─── Hermes over its gateway API: live words + tool steps, and Hermes keeps the chat's memory ──────────
+HERMES_HOME = HERMES_ENV.parent
+HERMES_API = "http://127.0.0.1:8642"
+HERMES_SESSION_FILE = BASE_DIR / "data" / "hermes-chat-session"  # Hermes session id; delete it to start a fresh chat
+_hermes_start_lock = threading.Lock()
+
+def _hermes_up() -> bool:
+    try:
+        return urllib.request.urlopen(f"{HERMES_API}/health", timeout=3).status == 200
+    except OSError:
+        return False
+
+def hermes_gateway_ensure(wait: int = 60) -> bool:
+    """Start Hermes's gateway (API, cron, phone chat) hidden when its API isn't answering."""
+    if _hermes_up():
+        return True
+    with _hermes_start_lock:
+        if _hermes_up():
+            return True
+        log = open(HERMES_HOME / "logs" / "gateway-os.log", "ab")
+        subprocess.Popen([resolve_cli("hermes"), "gateway", "run"], cwd=HERMES_HOME, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                         env={**os.environ, "HERMES_HOME": str(HERMES_HOME)},
+                         creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+        for _ in range(wait // 3):
+            time.sleep(3)
+            if _hermes_up():
+                return True
+    return False
+
+def _hermes_key() -> str:
+    lines = HERMES_ENV.read_text().splitlines() if HERMES_ENV.exists() else []
+    return next((l.split("=", 1)[1].strip() for l in lines if l.startswith("API_SERVER_KEY=")), "")
+
+def hermes_stream(message: str):
+    """Yields ("text", str) and ("tool", dict) from Hermes's chat API, resuming this chat's Hermes session."""
+    if not hermes_gateway_ensure():
+        raise RuntimeError("Hermes's gateway didn't start. See D:/Apps/hermes/logs/gateway-os.log.")
+    sid = HERMES_SESSION_FILE.read_text().strip() if HERMES_SESSION_FILE.exists() else ""
+    if not sid:
+        message = AGENT_RULES + message  # first turn of a session; Hermes remembers it after that
+    headers = {"Authorization": f"Bearer {_hermes_key()}", "Content-Type": "application/json", **({"X-Hermes-Session-Id": sid} if sid else {})}
+    body = json.dumps({"model": "hermes-agent", "stream": True, "stream_options": {"include_usage": True},
+                       "messages": [{"role": "user", "content": message}]}).encode()
+    with urllib.request.urlopen(urllib.request.Request(f"{HERMES_API}/v1/chat/completions", body, headers), timeout=600) as r:
+        if r.headers.get("X-Hermes-Session-Id"):
+            HERMES_SESSION_FILE.write_text(r.headers["X-Hermes-Session-Id"])
+        event = ""
+        for raw in r:
+            line = raw.decode("utf-8", "replace").rstrip("\r\n")
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    return
+                d = json.loads(data)
+                if event == "hermes.tool.progress":
+                    yield "tool", d
+                elif d.get("usage"):  # whole run's tokens (several model calls when tools ran); Hermes doesn't say its window
+                    yield "context", {"used": d["usage"].get("prompt_tokens", 0) + d["usage"].get("completion_tokens", 0), "window": None}
+                if (text := ((d.get("choices") or [{}])[0].get("delta") or {}).get("content")):
+                    yield "text", text
+            elif not line:
+                event = ""
+
+CLAUDE_SESSION_FILE = BASE_DIR / "data" / "claude-chat-session"  # Claude Code session id; delete it to start a fresh chat
+CLAUDE_COMMANDS_FILE = BASE_DIR / "data" / "claude-commands.json"  # its slash commands, as listed when a chat starts
+CHAT_CONTEXT_FILE = BASE_DIR / "data" / "chat-context.json"  # {agent: {used, window}} for the Chats page's context bar
+CHAT_SESSION_FILES = {"hermes": HERMES_SESSION_FILE, "claude": CLAUDE_SESSION_FILE}
+
+def chat_context(agent: str, value: Optional[dict] = None) -> Optional[dict]:
+    """Reads, or with value sets ({} clears), the context use of an agent's chat."""
+    data = json.loads(CHAT_CONTEXT_FILE.read_text()) if CHAT_CONTEXT_FILE.exists() else {}
+    if value is not None:
+        data[agent] = value
+        CHAT_CONTEXT_FILE.write_text(json.dumps(data))
+    return data.get(agent) or None
+
+def claude_stream(message: str):
+    """Yields ("text", str) and ("tool", dict) from Claude Code's live output, resuming this chat's session (read-only plan mode)."""
+    sid = CLAUDE_SESSION_FILE.read_text().strip() if CLAUDE_SESSION_FILE.exists() else ""
+    model = agent_model("claude", "sonnet")
+    args = [resolve_cli("claude"), "-p", message if sid else AGENT_RULES + message, "--output-format", "stream-json", "--verbose",
+            "--include-partial-messages", "--model", model, "--permission-mode", "plan", "--add-dir", READ_ROOT, *(["--resume", sid] if sid else [])]
+    AGENT_WORKDIR.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}  # subscription, never API credit
+    proc = subprocess.Popen(args, cwd=AGENT_WORKDIR, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        got_result = wrote = False
+        used = 0
+        for line in proc.stdout:
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = d.get("type")
+            if t == "stream_event":
+                ev = d["event"]
+                if ev.get("type") == "content_block_start" and ev.get("content_block", {}).get("type") == "text" and wrote:
+                    yield "text", "\n\n"  # new text block after a tool step
+                elif (ev.get("delta") or {}).get("type") == "text_delta":
+                    wrote = True
+                    yield "text", ev["delta"]["text"]
+            elif t == "system" and d.get("subtype") == "init" and d.get("slash_commands"):
+                CLAUDE_COMMANDS_FILE.write_text(json.dumps(sorted(d["slash_commands"])))
+            elif t == "system" and d.get("subtype") == "compact_boundary":
+                m = d.get("compact_metadata", {})
+                used = m.get("post_tokens", 0)
+                wrote = True
+                yield "text", f"Compacted the chat: {m.get('pre_tokens', 0) / 1000:.1f}k → {used / 1000:.1f}k tokens."
+            elif t == "assistant":
+                u = d["message"].get("usage") or {}
+                if u.get("input_tokens") or u.get("cache_read_input_tokens"):  # what this model call read = the chat's context now
+                    used = sum(u.get(k, 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"))
+                for c in d["message"].get("content", []):
+                    if c.get("type") == "tool_use":
+                        inp = c.get("input") or {}
+                        label = next((str(inp[k]) for k in ("file_path", "pattern", "command", "path", "query", "url", "description") if inp.get(k)), "")
+                        yield "tool", {"tool": c["name"], "toolCallId": c["id"], "label": label[:80], "status": "running"}
+            elif t == "user":
+                for c in d["message"].get("content", []):
+                    if isinstance(c, dict) and c.get("type") == "tool_result":
+                        yield "tool", {"toolCallId": c["tool_use_id"], "status": "completed"}
+            elif t == "result":
+                got_result = True
+                CLAUDE_SESSION_FILE.write_text(d.get("session_id", ""))
+                usage = d.get("usage", {})
+                # Subscription: cost is what the API would have charged, not money spent.
+                append_cost("claude", sum(usage.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                            "cache_read_input_tokens")), d.get("total_cost_usd", 0.0), model)
+                if d.get("is_error"):
+                    raise RuntimeError(d.get("result") or "Claude Code reported an error")
+                if not wrote and d.get("result"):  # local commands like /context answer here, not as live text
+                    yield "text", d["result"]
+                window = next((v.get("contextWindow") for v in (d.get("modelUsage") or {}).values() if v.get("contextWindow")), None)
+                if used:
+                    yield "context", {"used": used, "window": window}
+        proc.wait(timeout=30)
+        if not got_result:
+            CLAUDE_SESSION_FILE.unlink(missing_ok=True)  # e.g. the resumed session is gone; next message starts fresh
+            raise RuntimeError((proc.stderr.read() or f"claude exited with code {proc.returncode}").strip()[:400])
+    finally:
+        if proc.poll() is None:
+            proc.kill()  # the page closed mid-reply
+
+CHAT_STREAMS = {"hermes": hermes_stream, "claude": claude_stream}
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest):
+    """Server-sent events for the Chats page: {type: text|tool|done|error}. Hermes and Claude Code for now."""
+    agent = req.agent.lower().strip()
+    if agent not in CHAT_STREAMS:
+        raise HTTPException(400, f"Live streaming is only wired for {', '.join(CHAT_STREAMS)}")
+    message = (req.message or "").strip()
+    if not message or len(message) > 10000:
+        raise HTTPException(400, "Message must be 1-10000 characters")
+    label = {"hermes": "Hermes", "claude": "Claude Code"}[agent]
+    if message in ("/clear", "/new"):  # a fresh chat: the agent forgets, the thread here stays
+        CHAT_SESSION_FILES[agent].unlink(missing_ok=True)
+        chat_context(agent, {})
+        clear_chat(agent)
+        frames = [{"type": "context", "used": 0, "window": None}, {"type": "cleared"}]
+        return StreamingResponse(iter(f"data: {json.dumps(f)}\n\n" for f in frames), media_type="text/event-stream")
+    save_chat_message({"id": str(uuid.uuid4())[:8], "role": "user", "agent": agent, "content": message, "timestamp": get_timestamp()})
+    append_audit({"action": "chat_message", "agent": agent, "msg_preview": message[:50]})
+
+    def events():
+        sse = lambda d: f"data: {json.dumps(d)}\n\n"
+        text = ""
+        try:
+            for kind, val in CHAT_STREAMS[agent](message):
+                if kind == "text":
+                    text += val
+                    yield sse({"type": "text", "text": val})
+                elif kind == "context":
+                    chat_context(agent, val)
+                    yield sse({"type": "context", **val})
+                else:
+                    yield sse({"type": "tool", **val})
+        except Exception as e:
+            text += f"\n\n⚠ {label} stopped: {e}"
+            yield sse({"type": "error", "error": str(e)})
+        finally:  # saved even if the page closes mid-reply
+            msg = {"id": str(uuid.uuid4())[:8], "role": "assistant", "agent": agent,
+                   "content": text.strip() or f"{label} returned an empty reply.", "timestamp": get_timestamp()}
+            save_chat_message(msg)
+            if agent == "hermes":  # Claude's cost is logged from its result line
+                append_cost("hermes", 0, 0.0, agent_model("hermes", "hermes default"))
+        yield sse({"type": "done", "message": msg})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+
+@app.get("/api/chat/meta")
+def chat_meta(agent: str):
+    """The Chats page's context bar and the agent's own slash commands."""
+    if agent == "claude":
+        commands = json.loads(CLAUDE_COMMANDS_FILE.read_text()) if CLAUDE_COMMANDS_FILE.exists() else []
+    else:
+        commands = sorted(shared_skill_names(agent))
+    return {"context": chat_context(agent), "commands": commands, "live": agent in CHAT_STREAMS}
+
+# The other agents read the owner's Claude skills + enabled plugin skills (28 Oct): Hermes skills.external_dirs,
+# OpenCode "skills" (it reads ~/.claude/skills by itself), agy ~/.gemini/config/skills.json. sync_agent_skills keeps
+# the plugin paths current, since a plugin upgrade moves its skills to a new version folder.
+CLAUDE_HOME = Path.home() / ".claude"
+AGENT_OWN_SKILLS = {"hermes": HERMES_HOME / "skills", "opencode": Path.home() / ".config" / "opencode" / "skills", "agy": Path.home() / ".gemini" / "skills"}
+OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.jsonc"
+AGY_SKILLS_CONFIG = Path.home() / ".gemini" / "config" / "skills.json"
+
+def plugin_skill_dirs() -> list:
+    """Skills folders of the Claude plugins that are switched on, at their installed version."""
+    try:
+        enabled = json.loads((CLAUDE_HOME / "settings.json").read_text(encoding="utf-8")).get("enabledPlugins") or {}
+        installed = json.loads((CLAUDE_HOME / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins", {})
+    except (OSError, ValueError):
+        return []
+    dirs = [Path(i["installPath"]) / "skills" for k, v in installed.items() if enabled.get(k) for i in v[-1:] if i.get("installPath")]
+    return [d.as_posix() for d in dirs if d.is_dir()]
+
+def shared_skill_names(agent: str) -> set:
+    dirs = [CLAUDE_HOME / "skills", AGENT_OWN_SKILLS.get(agent, CLAUDE_HOME / "skills"), *map(Path, plugin_skill_dirs())]
+    return {f.parent.name for d in dirs if d.is_dir() for f in d.rglob("SKILL.md")}
+
+def sync_agent_skills() -> list:
+    """Points each agent's skill config at the current plugin folders; returns the agents whose config changed."""
+    plugins = plugin_skill_dirs()
+    shared = [(CLAUDE_HOME / "skills").as_posix(), *plugins]
+    changed = []
+    if OPENCODE_CONFIG.exists():
+        cfg = json.loads(OPENCODE_CONFIG.read_text(encoding="utf-8"))
+        if cfg.get("skills") != plugins:
+            cfg["skills"] = plugins
+            write_atomic(OPENCODE_CONFIG, json.dumps(cfg, indent=2))
+            changed.append("opencode")
+    if AGY_SKILLS_CONFIG.parent.exists():
+        want = {"entries": [{"path": d} for d in shared]}
+        if not AGY_SKILLS_CONFIG.exists() or json.loads(AGY_SKILLS_CONFIG.read_text(encoding="utf-8")) != want:
+            write_atomic(AGY_SKILLS_CONFIG, json.dumps(want, indent=2))
+            changed.append("agy")
+    hcfg = HERMES_HOME / "config.yaml"
+    if hcfg.exists():
+        text = hcfg.read_text(encoding="utf-8")
+        # the block written on 28 Oct: "  external_dirs:" followed by "    - <path>" lines
+        m = re.search(r"(?m)^  external_dirs:\n((?:    - .*\n)*)", text)
+        block = "".join(f"    - {d}\n" for d in shared)
+        if m and m.group(1) != block:
+            write_atomic(hcfg, text[:m.start(1)] + block + text[m.end(1):])
+            changed.append("hermes")
+    return changed
+
+def skill_sync_loop():
+    while True:
+        try:
+            changed = sync_agent_skills()
+            if changed:
+                print(f"[skills] plugin skill folders updated for: {', '.join(changed)}")
+                append_audit({"action": "skills_sync", "agent": ",".join(changed)})
+            if "hermes" in changed and _hermes_up():  # Hermes reads its config at start
+                for pid in re.findall(r'"pid":\s*(\d+)', (HERMES_HOME / "gateway.pid").read_text()):
+                    subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+                hermes_gateway_ensure()
+        except Exception as e:
+            print(f"[skills] sync failed: {e}")
+        time.sleep(6 * 3600)
+
 # ─── Routes: Sessions (agents working at the same time) ──────────
 
 SESSION_DIR = BASE_DIR / "data" / "sessions"
@@ -1560,9 +1931,15 @@ def session_prompt(agent: str, others: list, messages: list) -> str:
         f"Conversation:\n{transcript}\n\nYour turn:"
     )
 
+SESSION_META = ("title", "pinned", "section", "archived")  # set from the list's menu; a running round must not overwrite them
+
 def save_session(sess: dict):
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    (SESSION_DIR / f"{sess['id']}.json").write_text(json.dumps(sess, indent=2))
+    f = SESSION_DIR / f"{sess['id']}.json"
+    if f.exists():
+        on_disk = json.loads(f.read_text())
+        sess.update({k: on_disk[k] for k in SESSION_META if k in on_disk})
+    f.write_text(json.dumps(sess, indent=2))
 
 def run_session(sess: dict):
     from concurrent.futures import ThreadPoolExecutor
@@ -1572,19 +1949,22 @@ def run_session(sess: dict):
         sess["working"] = list(agents)
         save_session(sess)
         snapshot = list(sess["messages"])
+        prompts = {a: session_prompt(a, [o for o in agents if o != a], snapshot) for a in agents}
         with ThreadPoolExecutor(len(agents)) as pool:
-            outs = list(pool.map(lambda a: (a, execute_agent(a, session_prompt(a, [o for o in agents if o != a], snapshot))), agents))
+            outs = list(pool.map(lambda a: (a, execute_agent(a, prompts[a])), agents))
         all_done = True
         for agent, out in outs:
             done = out.rstrip().endswith("DONE")
             all_done &= done
-            sess["messages"].append({"role": "agent", "agent": agent, "round": sess["round"],
+            # shortcut: ~4 characters per token, the size of what this agent was sent this round (each round starts fresh)
+            sess["messages"].append({"role": "agent", "agent": agent, "round": sess["round"], "prompt_tokens": len(AGENT_RULES + prompts[agent]) // 4,
                                      "content": out.rstrip().removesuffix("DONE").rstrip(), "timestamp": get_timestamp()})
         sess["working"] = []
         save_session(sess)
         if all_done:
             break
     sess["status"] = "idle"
+    sess["read"] = False  # new replies; opening it marks it read
     save_session(sess)
     append_audit({"action": "session_round", "session": sess["id"], "agents": ",".join(agents)})
 
@@ -1662,6 +2042,332 @@ def get_session(session_id: str):
     if not f.exists():
         raise HTTPException(404, "Session not found")
     return json.loads(f.read_text())
+
+class SessionPatch(BaseModel):
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+    read: Optional[bool] = None
+    section: Optional[str] = None  # "" takes it out of its section
+    archived: Optional[bool] = None
+
+@app.patch("/api/sessions/{session_id}")
+def patch_session(session_id: str, req: SessionPatch):
+    """Rename, pin, mark read/unread, move to a section, archive."""
+    sess = get_session(session_id)
+    changes = req.model_dump(exclude_none=True)
+    if "title" in changes:
+        changes["title"] = changes["title"].strip()[:120]
+        if not changes["title"]:
+            raise HTTPException(400, "Name can't be empty")
+    if "section" in changes:
+        changes["section"] = changes["section"].strip()[:40]
+    sess.update(changes)
+    (SESSION_DIR / f"{session_id}.json").write_text(json.dumps(sess, indent=2))  # not save_session: these fields are the change
+    return sess
+
+@app.post("/api/sessions/{session_id}/fork")
+def fork_session(session_id: str):
+    """A copy of the conversation so far that goes its own way."""
+    sess = get_session(session_id)
+    if sess["status"] == "running":
+        raise HTTPException(409, "Wait for this round to finish before forking")
+    fork = {**sess, "id": str(uuid.uuid4())[:8], "title": f"{sess['title']} (fork)"[:120], "created": get_timestamp(),
+            "pinned": False, "read": True, "archived": False, "working": []}
+    save_session(fork)
+    return fork
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str):
+    """Moves the session to data/sessions/_deleted (recoverable by hand), not a hard delete."""
+    sess = get_session(session_id)
+    if sess["status"] == "running":
+        raise HTTPException(409, "Wait for this round to finish before deleting")
+    (SESSION_DIR / "_deleted").mkdir(exist_ok=True)
+    (SESSION_DIR / f"{session_id}.json").replace(SESSION_DIR / "_deleted" / f"{session_id}.json")
+    return {"deleted": session_id}
+
+# ─── Routes: Tickets (IT-style: severity, SLA due dates, Claude plans, Jhon approves, Claude fixes) ──────────
+
+TICKETS_FILE = BASE_DIR / "data" / "tickets" / "tickets.json"
+_tickets_lock = threading.RLock()
+# hours: (picked up by, resolved by). P1 is picked up at once.
+SLA_HOURS = {"P1": (0, 4), "P2": (1, 24), "P3": (8, 72), "P4": (24, 168)}
+TICKET_STATUSES = ("new", "planning", "awaiting_approval", "approved", "in_progress", "waiting_on_you", "resolved", "closed")
+TICKET_CATEGORIES = ("incident", "bug", "request", "change")
+
+class TicketCreate(BaseModel):
+    title: str
+    description: str = ""
+    category: str = "bug"
+    severity: str = "P3"
+    project: str = ""  # folder Claude works in; empty = the OS itself
+
+class TicketPatch(BaseModel):
+    title: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    due: Optional[str] = None
+
+class TicketComment(BaseModel):
+    text: str
+
+def _tickets() -> list:
+    return json.loads(TICKETS_FILE.read_text(encoding="utf-8")) if TICKETS_FILE.exists() else []
+
+def _save_tickets(items: list):
+    TICKETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(TICKETS_FILE, json.dumps(items, indent=2))
+
+def _ticket_log(t: dict, who: str, text: str):
+    t.setdefault("log", []).append({"at": get_timestamp(), "who": who, "text": text})
+    t["updated"] = get_timestamp()
+
+def _update_ticket(tid: str, fn) -> dict:
+    """Read-modify-write one ticket under the lock; fn changes it in place."""
+    with _tickets_lock:
+        items = _tickets()
+        t = next((x for x in items if x["id"] == tid), None)
+        if not t:
+            raise HTTPException(404, "Ticket not found")
+        fn(t)
+        _save_tickets(items)
+        return t
+
+def _hours_from_now(h: float) -> str:
+    return datetime.fromtimestamp(time.time() + h * 3600, timezone.utc).isoformat()
+
+@app.get("/api/tickets")
+def list_tickets():
+    return {"tickets": sorted(_tickets(), key=lambda t: (t["status"] in ("resolved", "closed"), t["severity"], t["due"])),
+            "sla": SLA_HOURS}
+
+@app.post("/api/tickets")
+def create_ticket(req: TicketCreate):
+    title = req.title.strip()
+    if not title or len(title) > 160 or len(req.description) > 20000:
+        raise HTTPException(400, "Title 1-160 characters, description up to 20000")
+    if req.severity not in SLA_HOURS or req.category not in TICKET_CATEGORIES:
+        raise HTTPException(400, f"Severity one of {list(SLA_HOURS)}, category one of {list(TICKET_CATEGORIES)}")
+    project = req.project.strip() or str(BASE_DIR)
+    if not Path(project).is_dir():
+        raise HTTPException(400, f"Project folder not found: {project}")
+    pickup, resolve = SLA_HOURS[req.severity]
+    with _tickets_lock:
+        items = _tickets()
+        n = max((int(t["id"].split("-")[1]) for t in items), default=0) + 1
+        t = {"id": f"TKT-{n:04d}", "title": title, "description": req.description.strip(), "category": req.category,
+             "severity": req.severity, "status": "new", "project": project, "reporter": owner.NAME, "assignee": "Claude",
+             "created": get_timestamp(), "pickup_by": _hours_from_now(pickup), "due": _hours_from_now(resolve),
+             "plan": "", "result": "", "log": []}
+        _ticket_log(t, owner.NAME, f"Opened ({req.severity}, {req.category})")
+        _save_tickets(items + [t])
+    append_audit({"action": "ticket_open", "agent": "claude", "msg_preview": f"{t['id']} {title[:40]}"})
+    if req.severity == "P1":
+        threading.Thread(target=ticket_tick, daemon=True).start()  # P1: no waiting for the next minute
+    return t
+
+@app.get("/api/tickets/{tid}")
+def get_ticket(tid: str):
+    t = next((x for x in _tickets() if x["id"] == tid), None)
+    if not t:
+        raise HTTPException(404, "Ticket not found")
+    return t
+
+@app.patch("/api/tickets/{tid}")
+def patch_ticket(tid: str, req: TicketPatch):
+    def change(t):
+        if req.title is not None and req.title.strip():
+            t["title"] = req.title.strip()[:160]
+        if req.severity is not None:
+            if req.severity not in SLA_HOURS:
+                raise HTTPException(400, "Unknown severity")
+            _ticket_log(t, owner.NAME, f"Severity {t['severity']} -> {req.severity}")
+            t["severity"] = req.severity
+        if req.status is not None:
+            if req.status not in ("closed", "new", "waiting_on_you"):
+                raise HTTPException(400, "You can close a ticket, reopen it (new) or park it (waiting_on_you)")
+            _ticket_log(t, owner.NAME, f"Status {t['status']} -> {req.status}")
+            t["status"] = req.status
+            if req.status == "new":  # reopened: picked up again now
+                t["pickup_by"] = get_timestamp()
+        if req.due is not None:
+            t["due"] = req.due
+            _ticket_log(t, owner.NAME, f"Due date set to {req.due}")
+    return _update_ticket(tid, change)
+
+@app.post("/api/tickets/{tid}/comment")
+def comment_ticket(tid: str, req: TicketComment):
+    if not req.text.strip():
+        raise HTTPException(400, "Comment cannot be empty")
+    return _update_ticket(tid, lambda t: _ticket_log(t, owner.NAME, req.text.strip()[:4000]))
+
+@app.post("/api/tickets/{tid}/approve")
+def approve_ticket(tid: str):
+    """Jhon approves Claude's plan: the worker makes the change next."""
+    def change(t):
+        if t["status"] != "awaiting_approval":
+            raise HTTPException(409, f"Ticket is {t['status']}, not waiting for approval")
+        t["status"] = "approved"
+        _ticket_log(t, owner.NAME, "Approved the plan")
+    t = _update_ticket(tid, change)
+    threading.Thread(target=ticket_tick, daemon=True).start()
+    return t
+
+@app.post("/api/tickets/{tid}/reject")
+def reject_ticket(tid: str, req: TicketComment):
+    """Not this plan: Claude plans again with Jhon's note."""
+    def change(t):
+        if t["status"] != "awaiting_approval":
+            raise HTTPException(409, f"Ticket is {t['status']}, not waiting for approval")
+        t["status"] = "new"
+        t["pickup_by"] = get_timestamp()
+        _ticket_log(t, owner.NAME, "Rejected the plan: " + (req.text.strip()[:4000] or "no note"))
+    return _update_ticket(tid, change)
+
+def _ticket_prompt(t: dict, stage: str) -> str:
+    notes = "\n".join(f"- {l['at'][:16]} {l['who']}: {l['text']}" for l in t.get("log", [])[-15:])
+    head = (f"IT ticket {t['id']} ({t['severity']}, {t['category']}), opened by {owner.NAME}.\nTitle: {t['title']}\n"
+            f"Description:\n{t['description'] or '(none)'}\n\nProject folder: {t['project']}\nTicket history:\n{notes}\n\n")
+    if stage == "plan":
+        return head + ("Investigate and write the fix plan. Change nothing. Give: the cause in one or two sentences, the "
+                       "exact files and changes, how you'll test it, and the risk. Keep it short and plain.")
+    return head + (f"{owner.NAME} approved this plan:\n{t['plan']}\n\nMake the change and test it. Never run git commit or "
+                   "git push, and don't delete data. End with what you changed, the test result, and a last line that "
+                   "is exactly STATUS: RESOLVED or STATUS: NEEDS JHON (with why).")
+
+def _run_ticket_claude(t: dict, stage: str) -> str:
+    model = agent_model("claude", "sonnet")
+    args = ["claude", "-p", _ticket_prompt(t, stage), "--output-format", "json", "--model", model, "--add-dir", READ_ROOT]
+    if stage == "plan":
+        args += ["--permission-mode", "plan"]
+    else:  # the approved fix: edits and commands in the project, but no commits, pushes or deletes
+        args += ["--permission-mode", "acceptEdits", "--allowedTools", "Bash",
+                 "--disallowedTools", "Bash(git commit:*)", "Bash(git push:*)", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)"]
+    code, out, err = run_cli(args, timeout=900 if stage == "plan" else 2400, cwd=Path(t["project"]))
+    try:
+        result = json.loads(out)
+    except json.JSONDecodeError:
+        raise RuntimeError((err or out or f"claude exited with code {code}").strip()[:600])
+    usage = result.get("usage", {})
+    append_cost("claude", sum(usage.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens")), result.get("total_cost_usd", 0.0), model)
+    if result.get("is_error"):
+        raise RuntimeError((result.get("result") or "Claude Code reported an error")[:600])
+    return (result.get("result") or "").strip()
+
+_ticket_worker_lock = threading.Lock()
+
+def ticket_tick():
+    """One step of work: fix an approved ticket first, else plan the next ticket whose pickup time has come."""
+    if not _ticket_worker_lock.acquire(blocking=False):
+        return  # one ticket at a time
+    try:
+        now = get_timestamp()
+        with _tickets_lock:
+            items = _tickets()
+            order = lambda t: (t["severity"], t["due"])
+            fix = sorted((t for t in items if t["status"] == "approved"), key=order)
+            plan = sorted((t for t in items if t["status"] == "new" and t["pickup_by"] <= now), key=order)
+            t = (fix or plan or [None])[0]
+            if not t:
+                return
+            stage = "fix" if fix else "plan"
+            t["status"] = "in_progress" if stage == "fix" else "planning"
+            _ticket_log(t, "Claude", "Started the fix" if stage == "fix" else "Picked up, investigating")
+            _save_tickets(items)
+        try:
+            out = _run_ticket_claude(t, stage)
+            ok = True
+        except Exception as e:  # noqa: BLE001 - the ticket says what went wrong
+            out, ok = f"Claude couldn't finish: {e}", False
+
+        def done(x):
+            if stage == "plan":
+                x["plan"] = out if ok else x.get("plan", "")
+                x["status"] = "awaiting_approval" if ok else "waiting_on_you"
+                _ticket_log(x, "Claude", "Plan ready for your Approve" if ok else out)
+            else:
+                x["result"] = out
+                resolved = ok and out.rstrip().splitlines()[-1].strip().upper().startswith("STATUS: RESOLVED")
+                x["status"] = "resolved" if resolved else "waiting_on_you"
+                _ticket_log(x, "Claude", "Resolved" if resolved else "Needs you: see the result")
+        _update_ticket(t["id"], done)
+        append_audit({"action": f"ticket_{stage}", "agent": "claude", "msg_preview": f"{t['id']} {'ok' if ok else 'failed'}"})
+    finally:
+        _ticket_worker_lock.release()
+
+def ticket_worker_loop():
+    while True:
+        try:
+            ticket_tick()
+        except Exception as e:  # noqa: BLE001 - keep the worker alive
+            print(f"[tickets] worker error: {e}")
+        time.sleep(60)
+
+def ticket_needs() -> list:
+    """Home page items: plans waiting for Jhon, tickets parked on him, and overdue ones."""
+    now = get_timestamp()
+    open_ = [t for t in _tickets() if t["status"] not in ("resolved", "closed")]
+    waiting = [t for t in open_ if t["status"] in ("awaiting_approval", "waiting_on_you")]
+    late = [t for t in open_ if t["due"] < now and t not in waiting]
+    return ([{"kind": "ticket", "title": f"{len(waiting)} ticket{'s' if len(waiting) != 1 else ''} waiting on you",
+              "detail": "; ".join(f"{t['id']} {t['title'][:50]}" for t in waiting[:3]), "action": "Open tickets", "link": "#/tickets"}]
+            if waiting else []) + \
+           ([{"kind": "ticket", "title": f"{len(late)} ticket{'s' if len(late) != 1 else ''} past due",
+              "detail": "; ".join(f"{t['id']} ({t['severity']})" for t in late[:3]), "action": "Open tickets", "link": "#/tickets"}]
+            if late else [])
+
+# ─── Routes: Weekly re-login (Jhon logs out and back in himself; nothing is forced) ──────────
+
+REAUTH_FILE = BASE_DIR / "data" / "reauth.json"
+REAUTH_DAYS = 7
+REAUTH_ACCOUNTS = {
+    "claude": ("Claude Code", 'echo Logging Claude Code out, then a browser opens to log back in. && claude auth logout && claude auth login'),
+    "agy": ("agy (Google)", 'echo In agy type /logout, then /login, then close this window. && agy'),
+}
+
+def _reauth_data() -> dict:
+    data = json.loads(REAUTH_FILE.read_text()) if REAUTH_FILE.exists() else {}
+    if any(k not in data for k in REAUTH_ACCOUNTS):  # first sight counts as a login: the first reminder is a week out
+        data = {k: data.get(k) or get_timestamp() for k in REAUTH_ACCOUNTS}
+        write_atomic(REAUTH_FILE, json.dumps(data, indent=2))
+    return data
+
+@app.get("/api/reauth")
+def reauth_status():
+    data, now = _reauth_data(), time.time()
+    out = []
+    for k, (label, _) in REAUTH_ACCOUNTS.items():
+        last = datetime.fromisoformat(data[k]).timestamp()
+        due = last + REAUTH_DAYS * 86400
+        out.append({"id": k, "label": label, "last": data[k], "due": datetime.fromtimestamp(due, timezone.utc).isoformat(),
+                    "overdue": now >= due})
+    return {"accounts": out, "days": REAUTH_DAYS}
+
+@app.post("/api/reauth/{acct}/start")
+def reauth_start(acct: str):
+    """Opens a visible terminal on the PC that logs this account out and starts its login."""
+    if acct not in REAUTH_ACCOUNTS:
+        raise HTTPException(404, "Unknown account")
+    label, cmd = REAUTH_ACCOUNTS[acct]
+    subprocess.Popen(["cmd", "/c", "start", f"Re-login {label}", "cmd", "/k", cmd], cwd=str(AGENT_WORKDIR))
+    append_audit({"action": "reauth_start", "agent": acct})
+    return {"status": "opened"}
+
+@app.post("/api/reauth/{acct}/done")
+def reauth_done(acct: str):
+    if acct not in REAUTH_ACCOUNTS:
+        raise HTTPException(404, "Unknown account")
+    data = _reauth_data()
+    data[acct] = get_timestamp()
+    write_atomic(REAUTH_FILE, json.dumps(data, indent=2))
+    append_audit({"action": "reauth_done", "agent": acct})
+    return reauth_status()
+
+def reauth_needs() -> list:
+    due = [a["label"] for a in reauth_status()["accounts"] if a["overdue"]]
+    return [{"kind": "reauth", "title": f"Weekly re-login due: {', '.join(due)}", "detail": "For security, log out and back in.",
+             "action": "Re-login", "link": "#/agents"}] if due else []
 
 # ─── Routes: Connections (MCP servers, per agent) ────────────────
 
