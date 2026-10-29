@@ -1,0 +1,21 @@
+{
+  "canvas": 256, "grid": 16,
+  "dims": {"leg": 172, "spread": 30, "stroke": 40, "half": "stroke/2", "node": 22, "gap": "half/2"},
+  "points": {
+    "P":  [128, 50],
+    "FL": {"polar": ["P", "leg", "90 + spread"]},
+    "FR": {"polar": ["P", "leg", "90 - spread"]},
+    "N":  {"fillet": [{"line": ["P", "FL"]}, {"line": ["P", "FR"]}, "half + gap + node"], "near": [128, 160]},
+    "tL": {"touch": [{"circle": ["N", "half + gap + node"]}, {"line": ["P", "FL"]}]},
+    "tR": {"touch": [{"circle": ["N", "half + gap + node"]}, {"line": ["P", "FR"]}]}
+  },
+  "guides": [{"line": ["P", [128, 230]]}, {"line": ["FL", "FR"]}, {"circle": ["N", "half + gap + node"]}, {"circle": ["P", "leg"]}],
+  "defs": "<linearGradient id='chrome' gradientUnits='userSpaceOnUse' x1='28' y1='28' x2='228' y2='228'><stop offset='0' stop-color='#5B6F86'/><stop offset='.55' stop-color='#1F2D44'/><stop offset='1' stop-color='#0E1726'/></linearGradient><linearGradient id='ice' gradientUnits='userSpaceOnUse' x1='0' y1='0' x2='256' y2='256'><stop offset='0' stop-color='#B9ECFF'/><stop offset='1' stop-color='#3FB6EC'/></linearGradient>",
+  "layers": [
+    {"fill": "url(#chrome)", "shapes": [
+      {"capsule": {"a": "P", "b": "FL", "r": "half"}},
+      {"capsule": {"a": "P", "b": "FR", "r": "half"}}
+    ]},
+    {"fill": "url(#ice)", "shapes": [{"circle": {"center": "N", "r": "node"}}]}
+  ]
+}

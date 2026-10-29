@@ -1,8 +1,9 @@
-import { X } from '@phosphor-icons/react'
+import { ArrowSquareOut, X } from '@phosphor-icons/react'
 import { AnimatePresence, motion, useMotionValue, type HTMLMotionProps } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { spring } from '../ui'
 import JharvisTalk, { type Mood } from '../JharvisTalk'
+import { isPopped, needLine, popOut } from '../PanelWindow'
 import WaveField, { type DotShape } from '../WaveField'
 
 type Panel = { id: string; title: string; lines: string[] }
@@ -10,26 +11,41 @@ type Ask = { id: string; tool: string; args: Record<string, unknown> }
 type Need = { kind: string; title: string; detail?: string; action?: string; link?: string }
 // stored error text can carry mangled emoji (e.g. "â±"); keep the readable part, first line only
 const clean = (t: string) => t.split('\n')[0].replace(/[^\x20-\x7E‘’“”–—]+/g, ' ').replace(/\s+/g, ' ').trim()
-
 // ?demo in the URL shows sample panels and cycles the wave colours, for design review
 const DEMO = new URLSearchParams(location.search).has('demo')
 const DEMO_MOOD = new URLSearchParams(location.search).get('demo') as Mood | null  // ?demo=good or ?demo=urgent holds one colour
-const DEMO_SHAPE = new URLSearchParams(location.search).get('shape')  // ?shape=ball|face|hand|hand_ball|heart|check|star holds the dots in it
+const DEMO_SHAPE = new URLSearchParams(location.search).get('shape')  // ?shape=ball|face|bust|hand|hand_ball|heart|check|star holds the dots in it; ?shape=look_left|look_right turns the head
 const SAMPLE: Panel[] = [
   { id: 'jobs', title: '4 jobs to approve', lines: ['Video editor, Shorts, $8/h, score 86', 'YouTube cutter, $6/h, score 81', 'Reels editor, clinic, $7/h, score 78', 'Podcast clipper, $5/h, score 74'] },
   { id: 'today', title: 'Today', lines: ['DYE post at 15:00 Manila, approved', 'Job search ran 14:00, 1 sent', 'D: drive 91% full'] },
 ]
 
-/** A glass panel Jhon can drag anywhere on the page (it stays there next time) and, with onClose, close with a quiet x. */
-function Glass({ id, label, bounds, onClose, className = '', children, ...motionProps }: Omit<HTMLMotionProps<'section'>, 'children'> & {
-  id: string; label: string; bounds: RefObject<HTMLDivElement | null>; onClose?: () => void; children: ReactNode
+/** A glass panel Jhon can drag anywhere on the page (it stays there next time) and, with onClose, close with a quiet x.
+ *  With onPopOut it also gets a pop-out button, and dropping it outside the window pops it out there. */
+function Glass({ id, label, bounds, onClose, onPopOut, className = '', children, ...motionProps }: Omit<HTMLMotionProps<'section'>, 'children'> & {
+  id: string; label: string; bounds: RefObject<HTMLDivElement | null>; onClose?: () => void
+  onPopOut?: (at?: PointerEvent) => void; children: ReactNode
 }) {
   const saved = (() => { try { return JSON.parse(localStorage.getItem(`panel-pos:${id}`) ?? 'null') } catch { return null } })()
   const x = useMotionValue<number>(saved?.x ?? 0), y = useMotionValue<number>(saved?.y ?? 0)
+  const out = useRef(false)  // popped out during this drag
+  // The desktop app stops getting the pointer once it leaves the window (a drop outside never arrives), so reaching
+  // the window's edge pops the panel out right there and the new window carries on with the drag (Jhon, 29 Oct).
+  const atEdge = (p: PointerEvent) => p.clientX <= 8 || p.clientY <= 8 || p.clientX >= innerWidth - 9 || p.clientY >= innerHeight - 9
   return (
     <motion.section aria-label={label} drag dragMomentum={false} dragElastic={0} dragConstraints={bounds} style={{ x, y }}
-      onDragEnd={() => { try { localStorage.setItem(`panel-pos:${id}`, JSON.stringify({ x: x.get(), y: y.get() })) } catch { /* private window */ } }}
+      onDragStart={() => { out.current = false }}
+      onDrag={e => { if (onPopOut && !out.current && atEdge(e as PointerEvent)) { out.current = true; onPopOut(e as PointerEvent) } }}
+      onDragEnd={() => {
+        if (out.current) return
+        try { localStorage.setItem(`panel-pos:${id}`, JSON.stringify({ x: x.get(), y: y.get() })) } catch { /* private window */ } }}
       className={`group liquid-glass relative cursor-grab rounded-[1.75rem] p-5 active:cursor-grabbing ${className}`} {...motionProps}>
+      {onPopOut && (
+        <button type="button" aria-label={`Pop out ${label}`} title="Pop out (or drag it out of the window)" onClick={() => onPopOut()} onPointerDown={e => e.stopPropagation()}
+          className="absolute right-10 top-3 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full text-ink-3 opacity-40 transition-opacity hover:bg-white/60 hover:text-ink hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-80">
+          <ArrowSquareOut size={13} weight="bold" aria-hidden="true" />
+        </button>
+      )}
       {onClose && (
         <button type="button" aria-label={`Close ${label}`} onClick={onClose} onPointerDown={e => e.stopPropagation()}
           className="absolute right-3 top-3 flex h-7 w-7 cursor-pointer items-center justify-center rounded-full text-ink-3 opacity-40 transition-opacity hover:bg-white/60 hover:text-ink hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-80">
@@ -132,8 +148,9 @@ export default function Home() {
               </div>
             </Glass>
           ))}
-          {side === 'left' && needs.length > 0 && !needsClosed && (
-            <Glass id="needs" label="Waiting on you" bounds={area} onClose={() => closePanel('needs')}>
+          {side === 'left' && needs.length > 0 && !needsClosed && !isPopped('needs') && (
+            <Glass id="needs" label="Waiting on you" bounds={area} onClose={() => closePanel('needs')}
+              onPopOut={at => { popOut({ id: 'needs', title: 'Waiting on you', lines: needs.map(needLine) }, at).catch(() => {}); setNeeds(n => [...n]) }}>
               <h2 className="mb-3 pr-8 text-[15px] font-medium tracking-tight text-ink">Waiting on you</h2>
               <ul className="flex flex-col gap-3">
                 {needs.map((n, k) => (
@@ -147,11 +164,12 @@ export default function Home() {
             </Glass>
           )}
           <AnimatePresence>
-            {panels.filter((_, i) => (i % 2 === 0) === (side === 'right')).map(p => (
+            {panels.filter(p => !isPopped(p.id)).filter((_, i) => (i % 2 === 0) === (side === 'right')).map(p => (
               <Glass key={p.id} id={`jharvis-${p.id}`} label={p.title} bounds={area} onClose={() => closePanel(p.id)}
+                onPopOut={at => { popOut(p, at).catch(() => {}); setPanels(ps => [...ps]) }}
                 initial={{ opacity: 0, scale: 0.92, filter: 'blur(8px)' }} animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
                 exit={{ opacity: 0, scale: 0.94, filter: 'blur(8px)' }} transition={spring}>
-                <h2 className="mb-3 pr-8 text-[15px] font-medium tracking-tight text-ink">{p.title}</h2>
+                <h2 className="mb-3 pr-16 text-[15px] font-medium tracking-tight text-ink">{p.title}</h2>
                 <ul className="flex flex-col gap-2">
                   {p.lines.map((l, k) => <li key={k} className="text-sm leading-snug text-ink-2">{l}</li>)}
                 </ul>

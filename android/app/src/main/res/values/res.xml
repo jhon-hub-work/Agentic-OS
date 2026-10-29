@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ice">#E6EEF4</color>
+    <style name="Theme.AgenticOS" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ice</item>
+    </style>
+</resources>

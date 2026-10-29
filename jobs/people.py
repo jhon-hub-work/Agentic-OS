@@ -131,7 +131,11 @@ def run(pid: str, run_agent, log=print) -> dict:
     queue = [j for j in new_items + b["jobs"] if j["status"] == "queued"]
     drafted = {}
     for item in sorted(queue, key=lambda j: j.get("score") or 0, reverse=True)[:MAX_DRAFT]:
-        text = draft(p, item, run_agent, cv) if cv else ""
+        try:
+            text = draft(p, item, run_agent, cv) if cv else ""
+        except RuntimeError as e:  # the OS's Claude guard: the rest stay queued for the next run
+            stats["errors"].append(f"drafting: {e}")
+            break
         problem = pipeline.leaks(text) if cv else "no CV found"
         drafted[item["id"]] = dict(draft=text, status="draft_blocked" if problem else "drafted", problem=problem)
         stats["drafted"] += not problem

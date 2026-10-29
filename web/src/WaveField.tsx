@@ -17,7 +17,7 @@ const PRESETS: Record<string, { paths: string[]; fill: boolean }> = {
 /** A 3D shape as dots on its surface: positions and outward normals, centred, about -1..1, y up.
  *  dense = a model (head, hand) that needs many small dots to read; jaw = how far each dot drops when he talks;
  *  size / lift = bigger / lower than the standard shape (the head stands with its shoulders in the wave). */
-type Cloud = { p: Float32Array; n: Float32Array; count: number; dense: boolean; orb?: boolean; jaw?: Float32Array; size?: number; lift?: number }
+type Cloud = { p: Float32Array; n: Float32Array; count: number; dense: boolean; orb?: boolean; jaw?: Float32Array; size?: number; lift?: number; unit?: number }
 const MAX = 6500  // most dots a shape may use
 
 /** Keeps candidates (in random order) at least d apart, so dots sit evenly like the wave's. */
@@ -93,7 +93,8 @@ function inflate(paths: string[], fill: boolean, d: number): Cloud | null {
 }
 
 /** Dots spread evenly over a model's surface (about `count`), centred and scaled to about -1..1.
- *  cut drops everything below that height (in -1..1), e.g. the shoulders of a head scan, and re-centres the rest. */
+ *  cut drops everything below that height (in -1..1), e.g. the shoulders of a head scan, and re-centres the rest.
+ *  unit = how much the model was scaled, so two clouds of one model can be compared. */
 function modelCloud(root: THREE.Object3D, count: number, turn: THREE.Euler, cut = -Infinity): Cloud | null {
   root.updateMatrixWorld(true)
   let mesh: THREE.Mesh | undefined
@@ -126,7 +127,19 @@ function modelCloud(root: THREE.Object3D, count: number, turn: THREE.Euler, cut 
   const s2 = 2 / Math.max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]), mid = lo.map((v, j) => (v + hi[j]) / 2)
   for (let i = 0; i < P.length; i++) P[i] = (P[i] - mid[i % 3]) * s2
   const kept = area * (P.length / 3 / (count * 12)) * s2 * s2  // the surface left after the cut, rescaled
-  return thin(P, N, Math.sqrt(kept / count) * 0.8, true)
+  return { ...thin(P, N, Math.sqrt(kept / count) * 0.8, true), unit: sc * s2 }
+}
+
+/** The jaw of a head cloud: dots below the nose tip, at the front, drop (by up to u) when he talks. u = the head's size (1 = the face). */
+function addJaw(c: Cloud, u: number) {
+  let tip = 0
+  for (let k = 1; k < c.count; k++) if (c.p[k * 3 + 2] > c.p[tip * 3 + 2]) tip = k
+  const ny = c.p[tip * 3 + 1], nz = c.p[tip * 3 + 2], jaw = new Float32Array(c.count)
+  for (let k = 0; k < c.count; k++) {
+    const x = c.p[k * 3], y = c.p[k * 3 + 1], z = c.p[k * 3 + 2], below = ny - 0.2 * u - y
+    if (below > 0 && below < 0.5 * u && z > nz - 0.55 * u && Math.abs(x) < 0.45 * u) jaw[k] = u * Math.min(1, below / (0.12 * u)) * (1 - Math.abs(x) / (0.45 * u))
+  }
+  c.jaw = jaw
 }
 
 /** Two clouds as one (a hand holding a ball). */
@@ -135,6 +148,46 @@ function joinClouds(a: Cloud, b: Cloud, at: [number, number, number]): Cloud {
   p.set(a.p); n.set(a.n); n.set(b.n, a.count * 3)
   for (let k = 0; k < b.count; k++) for (let j = 0; j < 3; j++) p[(a.count + k) * 3 + j] = b.p[k * 3 + j] + at[j]
   return { p, n, count: Math.min(a.count + b.count, MAX), dense: true }
+}
+
+/** Each dot joined to its nearest neighbour going round the shape (sideways along the surface), so the links run in
+ *  strokes like contour lines on a line drawing: pairs (a, b) and each pair's length. */
+function linksOf(c: Cloud): { ab: Uint32Array; rest: Float32Array } {
+  const at = (i: number) => [c.p[i * 3], c.p[i * 3 + 1], c.p[i * 3 + 2]]
+  const d2 = (i: number, j: number) => (c.p[i * 3] - c.p[j * 3]) ** 2 + (c.p[i * 3 + 1] - c.p[j * 3 + 1]) ** 2 + (c.p[i * 3 + 2] - c.p[j * 3 + 2]) ** 2
+  // the dots' spacing: median distance to the nearest one, from a sample
+  const near: number[] = []
+  for (let s = 0; s < 150; s++) {
+    const i = Math.floor(Math.random() * c.count)
+    let m = Infinity
+    for (let j = 0; j < c.count; j++) if (j !== i) m = Math.min(m, d2(i, j))
+    near.push(Math.sqrt(m))
+  }
+  const R = near.sort((a, b) => a - b)[near.length >> 1] * 1.8, cell = (v: number) => Math.floor(v / R), grid = new Map<string, number[]>()
+  for (let i = 0; i < c.count; i++) {
+    const key = at(i).map(cell).join()
+    if (!grid.has(key)) grid.set(key, [])
+    grid.get(key)!.push(i)
+  }
+  const ab: number[] = [], rest: number[] = [], up = new THREE.Vector3(0, 1, 0), tg = new THREE.Vector3(), nv = new THREE.Vector3(), v = new THREE.Vector3()
+  for (let i = 0; i < c.count; i++) {
+    // the way round: across the normal, level (straight across where the normal points up, e.g. the crown)
+    tg.crossVectors(nv.fromArray(c.n, i * 3), up)
+    if (tg.lengthSq() < 0.05) tg.set(1, 0, 0)
+    tg.normalize()
+    const [x, y, z] = at(i).map(cell)
+    let best = -1, score = Infinity
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let e = -1; e <= 1; e++)
+      for (const j of grid.get(`${x + a},${y + b},${z + e}`) ?? []) {
+        v.fromArray(c.p, j * 3).sub(nv.fromArray(c.p, i * 3))
+        const along = v.dot(tg), l = v.length()
+        if (j === i || along <= 0.3 * l || l > R) continue
+        const sc = l + 3 * Math.sqrt(Math.max(0, l * l - along * along))  // near, and straight along the way round
+        if (sc < score) { score = sc; best = j }
+      }
+    if (best >= 0) { ab.push(i, best); rest.push(Math.sqrt(d2(i, best))) }
+  }
+  return { ab: Uint32Array.from(ab), rest: Float32Array.from(rest) }
 }
 
 /** Jharvis's "voice": a particle wave field (voice-recorder style), in Glacier colours.
@@ -214,6 +267,20 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
     const sPts = new THREE.Points(sGeo, sMat)
     sPts.frustumCulled = false
     scene.add(sPts)
+    // night theme: the dots also read as glowing strokes (each joined to its nearest), with now and then a spark of
+    // lightning off the silhouette, like a hologram
+    const still = matchMedia('(prefers-reduced-motion: reduce)').matches
+    const LN = MAX, BOLTS = 3, BSEG = 6  // one link per dot
+    const lPos = new Float32Array((LN + BOLTS * BSEG) * 6), lCol = new Float32Array((LN + BOLTS * BSEG) * 8)
+    const lGeo = new THREE.BufferGeometry()
+    lGeo.setAttribute('position', new THREE.BufferAttribute(lPos, 3))
+    lGeo.setAttribute('color', new THREE.BufferAttribute(lCol, 4))
+    const lMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending })
+    const lines = new THREE.LineSegments(lGeo, lMat)
+    lines.frustumCulled = false
+    scene.add(lines)
+    const linkCache = new WeakMap<Cloud, ReturnType<typeof linksOf>>(), bolts = Array.from({ length: BOLTS }, () => ({ until: 0, p: new Float32Array(BSEG * 6) }))
+    let linked: Cloud | null = null
     // the side facing the camera is lit, the far side shows through faintly
     const view = new THREE.Vector3().subVectors(camera.position, new THREE.Vector3(CX, CY, CZ)).normalize()
     // models are lit from above, front left, so a nose, eyes and fingers cast shadows
@@ -221,21 +288,15 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
 
     const unitStep = STEP / S  // the wave's spacing, in shape units
     const orbCloud = { ...sphereCloud(unitStep), size: 0.85 }
-    let head: Cloud | null = null, hand: Cloud | null = null, handBall: Cloud | null = null
+    let head: Cloud | null = null, bust: Cloud | null = null, hand: Cloud | null = null, handBall: Cloud | null = null
     const loader = new GLTFLoader()
     loader.load(headUrl, gl => {
-      head = modelCloud(gl.scene, 6000, new THREE.Euler(0, 0, 0), -0.45)  // head and neck, no shoulders
-      if (!head) return
-      head.size = 1.15; head.lift = -0.15
-      // the jaw: dots below the nose tip, at the front, drop when he talks
-      let tip = 0
-      for (let k = 1; k < head.count; k++) if (head.p[k * 3 + 2] > head.p[tip * 3 + 2]) tip = k
-      const ny = head.p[tip * 3 + 1], nz = head.p[tip * 3 + 2], jaw = new Float32Array(head.count)
-      for (let k = 0; k < head.count; k++) {
-        const x = head.p[k * 3], y = head.p[k * 3 + 1], z = head.p[k * 3 + 2], below = ny - 0.2 - y
-        if (below > 0 && below < 0.5 && z > nz - 0.55 && Math.abs(x) < 0.45) jaw[k] = Math.min(1, below / 0.12) * (1 - Math.abs(x) / 0.45)
-      }
-      head.jaw = jaw
+      const h = modelCloud(gl.scene, 6000, new THREE.Euler(0, 0, 0), -0.45)  // head and neck, no shoulders
+      const b = modelCloud(gl.scene, MAX, new THREE.Euler(0, 0, 0))  // the whole scan: head, neck and shoulders
+      if (!h || !b) return
+      h.size = 1.15; h.lift = -0.15; addJaw(h, 1)
+      b.size = 1.2; b.lift = 0.05; addJaw(b, b.unit! / h.unit!)  // scaled to its shoulders, so its head is smaller in -1..1
+      head = h; bust = b
     }, undefined, () => { /* no head: he talks as an orb */ })
     loader.load(handUrl, gl => {
       hand = modelCloud(gl.scene, 2400, new THREE.Euler(Math.PI + 0.5, 0, -Math.PI / 2))  // palm up and tipped toward you, fingers left, like an offering
@@ -247,6 +308,7 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
       if (sp.paths?.length) return inflate(sp.paths, !!sp.fill, unitStep * 0.28)  // drawings need finer dots than the wave to read
       if (sp.name === 'orb' || sp.name === 'ball') return orbCloud
       if (sp.name === 'face') return head ?? undefined
+      if (sp.name === 'bust') return bust ?? undefined
       if (sp.name === 'hand') return hand ?? undefined
       if (sp.name === 'hand_ball') return handBall ?? undefined
       const pre = sp.name ? PRESETS[sp.name] : undefined
@@ -273,6 +335,11 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
     addEventListener('pointerup', onUp)
 
     let talkForm: 'orb' | 'face' = 'orb', wasSpeaking = false, lastTalk = -10, formMix = 0, drawnId = '', drawn: Cloud | null = null, bottom = [CX, CY - S, CZ]
+    // "look left / right / ahead" (a shape named look_*): the head shown, or the bust, turns there and holds a few seconds
+    let shown: Cloud | null = null, lookYaw = 0, lookUntil = -10
+    // becoming the head or bust: the dots first gather into one bright point (GATHER s), then grow out into the figure (GROW s)
+    const GATHER = 0.4, GROW = 1, from = new Float32Array(MAX * 3), fromA = new Float32Array(MAX)
+    let prevCloud: Cloud | null = null, gatherEnd = -10, burst = false
 
     const mouse = { x: 0, y: 0, tx: 0, ty: 0 }
     const onMove = (e: PointerEvent) => { mouse.tx = e.clientX / innerWidth - 0.5; mouse.ty = e.clientY / innerHeight - 0.5 }
@@ -303,10 +370,23 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
       wasSpeaking = talking
       const sp = shape?.current
       if (sp && sp.id !== drawnId) {
-        const c = cloudFor(sp)
+        const look = sp.name?.match(/^look_(left|right|ahead)$/)?.[1]
+        const c = look ? (shown?.jaw ? shown : bust ?? undefined) : cloudFor(sp)
         if (c !== undefined) { drawnId = sp.id; drawn = c }
+        if (look && c) { lookYaw = look === 'ahead' ? 0 : look === 'left' ? 0.75 : -0.75; lookUntil = t + 4; vyaw = vpitch = 0 }  // his own left, your right
       }
       const cloud = sp ? (sp.id === drawnId ? drawn : null) : talking ? (talkForm === 'face' && head ? head : orbCloud) : null
+      shown = cloud
+      if (cloud !== prevCloud && cloud?.jaw && !still) { gatherEnd = t + GATHER; burst = true; from.set(sPos.subarray(0, MAX * 3)); for (let k = 0; k < MAX; k++) fromA[k] = sCol[k * 4 + 3] }
+      prevCloud = cloud
+      const gathering = t < gatherEnd, pt = [CX, CY + (cloud?.lift ?? 0), CZ]
+      const pull = THREE.MathUtils.smoothstep(1 - (gatherEnd - t) / GATHER, 0, 0.75)  // all there by 3/4 of the way, then a beat as a point
+      const spread = 1 - (1 - THREE.MathUtils.clamp((t - gatherEnd) / GROW, 0, 1)) ** 3  // the figure's size, from the point out
+      if (burst && !gathering) {  // the point bursts: every figure dot starts from it, already facing you (a point has no turn to jump from)
+        for (let k = 0; k < (cloud?.count ?? 0); k++) sPos.set(pt, k * 3)
+        burst = false
+        if (!drag) { yaw = t < lookUntil ? lookYaw : Math.sin(t * 0.5) * 0.35; pitch = -0.2; vyaw = vpitch = 0 }
+      }
       formMix += ((cloud ? 1 : 0) - formMix) * (1 - Math.exp(-dt * 2.4))
       // the wave calms and settles lower while a shape stands over it (so the shape reads), but keeps the voice in it
       const amp = (1 + e * 4.5) * (1 - formMix * 0.45), flat = 1 - formMix * 0.5, drop = formMix * 0.6
@@ -321,7 +401,8 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
       geo.attributes.position.needsUpdate = true
 
       if (cloud || shapeOn) {
-        if (cloud) sMat.size = cloud.dense ? 0.075 : 0.13
+        const glow = gathering ? pull ** 3 : Math.max(0, 1 - (t - gatherEnd) / 0.2)  // peaks as the point bursts
+        if (cloud) sMat.size = (cloud.dense ? 0.075 : 0.13) * (1 + glow * 2)
         const dark = document.documentElement.classList.contains('dark')
         sMat.blending = dark ? THREE.AdditiveBlending : THREE.NormalBlending  // a glow on the night theme
         tmp.set(palettes[target()][1])
@@ -331,12 +412,15 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
           yaw += vyaw; pitch = THREE.MathUtils.clamp(pitch + vpitch, -0.9, 0.9)
           const f = Math.exp(-dt * 3)
           vyaw *= f; vpitch *= f
-          if (t - lastDrag > 3) {
+          if (t < lookUntil) {
+            const k = 1 - Math.exp(-dt * 2.5)
+            yaw += (lookYaw - yaw) * k; pitch += (-0.2 - pitch) * k
+          } else if (t - lastDrag > 3) {
             const k = 1 - Math.exp(-dt * 1.2)
             if (cloud?.orb) { yaw += dt * 0.4; pitch += (0.15 - pitch) * k }  // a ball looks the same all round: spin it
             else {  // anything else sways so it never turns edge-on; the head lifts its chin (the camera looks down)
-              yaw += (Math.sin(t * 0.5) * (cloud === head ? 0.35 : 0.5) - yaw) * k
-              pitch += ((cloud === head ? -0.2 : 0.1) - pitch) * k
+              yaw += (Math.sin(t * 0.5) * (cloud?.jaw ? 0.35 : 0.5) - yaw) * k
+              pitch += ((cloud?.jaw ? -0.2 : 0.1) - pitch) * k
             }
           }
         }
@@ -347,11 +431,16 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
         for (let k = 0; k < MAX; k++) {
           const c = k * 3
           let tx: number, ty: number, tz: number, ta: number
-          if (k < count) {
+          if (gathering && (k < count || sCol[k * 4 + 3] > 0.01)) {  // every dot on show, and the figure's from the wave, to the point
+            sPos[c] = from[c] + (pt[0] - from[c]) * pull; sPos[c + 1] = from[c + 1] + (pt[1] - from[c + 1]) * pull; sPos[c + 2] = from[c + 2] + (pt[2] - from[c + 2]) * pull
+            tx = sPos[c]; ty = sPos[c + 1]; tz = sPos[c + 2]
+            ta = sCol[k * 4 + 3] = fromA[k] + (1 - fromA[k]) * pull ** 6  // dots from the wave light up only as they arrive (6500 faint dots still read as a band)
+            if (ty < by) { by = ty; bottom = [tx, ty, tz] }
+          } else if (k < count) {
             const wob = cloud!.orb ? 1 + Math.sin(t * 4 + k * 0.37) * 0.025 * (0.3 + e) : 1
             const px = cloud!.p[c] * grow * wob, py = cloud!.p[c + 1] * grow * wob - (cloud!.jaw ? cloud!.jaw[k] * e * 0.14 : 0), pz = cloud!.p[c + 2] * grow * wob
             const x1 = px * cy + pz * sy, z1 = -px * sy + pz * cy, y2 = py * cp - z1 * spn, z2 = py * spn + z1 * cp
-            tx = CX + x1 * Sc; ty = CY + lift + y2 * Sc; tz = CZ + z2 * Sc
+            tx = CX + x1 * Sc * spread; ty = CY + lift + y2 * Sc * spread; tz = CZ + z2 * Sc * spread
             const nx = cloud!.n[c], ny = cloud!.n[c + 1], nz = cloud!.n[c + 2]
             const nx1 = nx * cy + nz * sy, nz1 = -nx * sy + nz * cy, ny2 = ny * cp - nz1 * spn, nz2 = ny * spn + nz1 * cp
             if (cloud!.dense) {  // models need deep shadows to show a nose, lips, fingers; the far side stays faint
@@ -384,6 +473,51 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
             sCol.set([tmp.r, tmp.g, tmp.b, a], k * 4)
           }
         }
+        // glowing strokes along each dot's links, fading out where a link is stretched (dots still flying in or out)
+        if (cloud) linked = cloud
+        let ln = 0
+        if (dark && linked) {
+          if (!linkCache.has(linked)) linkCache.set(linked, linksOf(linked))
+          const { ab, rest } = linkCache.get(linked)!, sc = S * (linked.size ?? 1)
+          for (let l = 0; l < rest.length && l < LN; l++) {
+            const a = ab[l * 2], b = ab[l * 2 + 1]
+            const len = Math.hypot(sPos[a * 3] - sPos[b * 3], sPos[a * 3 + 1] - sPos[b * 3 + 1], sPos[a * 3 + 2] - sPos[b * 3 + 2])
+            const al = Math.min(sCol[a * 4 + 3], sCol[b * 4 + 3]) * THREE.MathUtils.clamp(2.5 - 1.5 * len / (rest[l] * sc), 0, 1) * 0.8
+            if (al < 0.01) continue
+            lPos.set(sPos.subarray(a * 3, a * 3 + 3), ln * 6); lPos.set(sPos.subarray(b * 3, b * 3 + 3), ln * 6 + 3)
+            lCol.set([tmp.r, tmp.g, tmp.b, al, tmp.r, tmp.g, tmp.b, al], ln * 8)
+            ln++
+          }
+          // lightning: a short jagged spark out from a dot on the silhouette (edge-on to you), for a split second
+          if (!still && cloud && formMix > 0.9 && Math.random() < dt * 0.8) {
+            const bo = bolts.find(x => t > x.until)
+            for (let tries = 0; bo && tries < 60; tries++) {
+              const k = Math.floor(Math.random() * cloud.count), c = k * 3, nx = cloud.n[c], ny = cloud.n[c + 1], nz = cloud.n[c + 2]
+              const n1 = new THREE.Vector3(nx * cy + nz * sy, 0, -nx * sy + nz * cy), nv = new THREE.Vector3(n1.x, ny * cp - n1.z * spn, ny * spn + n1.z * cp)
+              const f = nv.dot(view)
+              if (Math.abs(f) > 0.15 || sCol[k * 4 + 3] < 0.02) continue
+              const out = nv.addScaledVector(view, -f).normalize(), side = new THREE.Vector3().crossVectors(out, view).normalize()
+              const p = new THREE.Vector3().fromArray(sPos, c)
+              for (let j = 0; j < BSEG; j++) {
+                bo.p.set([p.x, p.y, p.z], j * 6)
+                p.addScaledVector(out, 0.06 + Math.random() * 0.05).addScaledVector(side, (Math.random() - 0.5) * 0.12)
+                bo.p.set([p.x, p.y, p.z], j * 6 + 3)
+              }
+              bo.until = t + 0.08 + Math.random() * 0.12
+              break
+            }
+          }
+          for (const bo of bolts) if (t < bo.until && Math.random() < 0.8) {  // flickers while it lasts
+            lPos.set(bo.p, ln * 6)
+            for (let j = 0; j < BSEG; j++, ln++) {
+              const a = 1 - j / BSEG * 0.7
+              lCol.set([0.75 + tmp.r * 0.25, 0.85 + tmp.g * 0.15, 1, a, 0.75 + tmp.r * 0.25, 0.85 + tmp.g * 0.15, 1, a * 0.8], ln * 8)
+            }
+          }
+        }
+        lGeo.setDrawRange(0, ln * 2)
+        lGeo.attributes.position.needsUpdate = true
+        lGeo.attributes.color.needsUpdate = true
         shapeOn = alive || formMix > 0.01
         sGeo.setDrawRange(0, shapeOn ? SN : 0)
         sGeo.attributes.position.needsUpdate = true
@@ -405,8 +539,8 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
         }
         geo.attributes.color.needsUpdate = true
       }
-      points.rotation.y = sPts.rotation.y = mouse.x * 0.25
-      points.rotation.x = sPts.rotation.x = mouse.y * 0.08
+      points.rotation.y = sPts.rotation.y = lines.rotation.y = mouse.x * 0.25
+      points.rotation.x = sPts.rotation.x = lines.rotation.x = mouse.y * 0.08
       renderer.render(scene, camera)
     }
 
@@ -416,7 +550,7 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
     let raf = 0, visible = true
     const io = new IntersectionObserver(([en]) => { visible = en.isIntersecting })
     io.observe(canvas)
-    if (matchMedia('(prefers-reduced-motion: reduce)').matches) frame(1)
+    if (still) frame(1)
     else {
       const loop = (ms: number) => { if (visible && !document.hidden) frame(ms / 1000); raf = requestAnimationFrame(loop) }
       raf = requestAnimationFrame(loop)
@@ -425,7 +559,7 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
       cancelAnimationFrame(raf); ro.disconnect(); io.disconnect()
       removeEventListener('pointermove', onMove)
       removeEventListener('pointerdown', onDown); removeEventListener('pointermove', onDrag); removeEventListener('pointerup', onUp)
-      geo.dispose(); mat.dispose(); sGeo.dispose(); sMat.dispose(); tex.dispose(); renderer.dispose()
+      geo.dispose(); mat.dispose(); sGeo.dispose(); sMat.dispose(); lGeo.dispose(); lMat.dispose(); tex.dispose(); renderer.dispose()
     }
   }, [])
 

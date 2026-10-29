@@ -23,7 +23,26 @@ const level = (an: AnalyserNode, buf: Uint8Array<ArrayBuffer>, gain: number) => 
 
 /** Jharvis's voice on his page: subtitles, mic, a keyboard for quiet rooms, mute.
  *  Drives the waves through `energy` (mic or his voice), `mood` (colour of his reply) and `speaking` (his voice only). */
-export default function JharvisTalk({ energy, mood, speaking, onReply, sample }: { energy: { current: number }; mood: { current: Mood }; speaking?: { current: boolean }; onReply: () => void; sample?: string }) {
+const ACKS = {
+  ask: ['Let me check.', 'Good question, one sec.', 'Looking into it.'],
+  task: ['On it.', 'Right away, sir.', 'Working on it.'],
+  other: ['Mm, let me think.', 'One moment, sir.'],
+}
+const ACKS_ALL = [...ACKS.ask, ...ACKS.task, ...ACKS.other]
+const IS_PHONE = /Android|iPhone|iPad/i.test(navigator.userAgent)  // the phone app / phone browser
+const SMALL_TALK =/^(hi|hey|hello|yo|thanks?|thank you|ok(ay)?|yes|yeah|yep|no|nope|cool|nice|great|good( (morning|night))?)\b[\s!.?]*$/i
+
+/** The filler for this message, or '' for none: small talk and a flowing conversation (a filler under 45 s ago) get none. */
+function pickAck(m: string, last: { text: string; at: number }, now = Date.now()): string {
+  const t = m.trim()
+  if (SMALL_TALK.test(t) || t.split(/\s+/).length <= 2 || now - last.at < 45000) return ''
+  const kind = /\?$|^(what|how|why|when|where|who|which|can|could|is|are|do|does|did|should|will|would)\b/i.test(t) ? 'ask'
+    : /^(please\s+)?(open|show|make|send|find|check|start|stop|run|turn|play|close|add|create|draft|look|put|set|tell)\b/i.test(t) ? 'task' : 'other'
+  const choices = ACKS[kind].filter(a => a !== last.text)
+  return choices[Math.floor(Math.random() * choices.length)]
+}
+
+export default function JharvisTalk({ energy, mood, speaking, onReply, sample, big }: { energy: { current: number }; mood: { current: Mood }; speaking?: { current: boolean }; onReply: () => void; sample?: string; big?: boolean }) {
   const [subtitle, setSubtitle] = useState(sample ?? '')
   const [status, setStatus] = useState<'idle' | 'listening' | 'transcribing' | 'thinking'>('idle')
   const [typing, setTyping] = useState(false)
@@ -42,6 +61,7 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
   const again = () => { if (handsFreeRef.current) setTimeout(() => { if (handsFreeRef.current) listen() }, 350) }
   const calm = useRef(0)
   const seen = useRef<Set<string> | null>(null)
+  const askedHere = useRef<boolean | null>(null)  // was the last question asked on this device? null: none since it opened
   const ctx = () => (audioCtx.current ??= new AudioContext())
 
   // browsers keep audio locked until the first click or key on the page
@@ -67,13 +87,18 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
         }
         for (const m of messages) if (!seen.current.has(m.id)) {
           seen.current.add(m.id)
-          if (m.role === 'jharvis') { setStatus('idle'); setSubtitle(brief(m.text)); onReply(); setMood(m.mood ?? 'normal'); speak(brief(m.text)) }
+          if (m.role === 'owner') askedHere.current = false  // Jhon asked from his other device: that one answers aloud
+          if (m.role === 'jharvis') {
+            setStatus('idle'); setSubtitle(brief(m.text)); onReply(); setMood(m.mood ?? 'normal')
+            // only the device he talked to speaks (PC and phone talked over each other, 29 Oct); unprompted: the PC
+            if (askedHere.current ?? !IS_PHONE) speak(brief(m.text)); else settle()
+          }
         }
       } catch { /* the OS restarting; try again next tick */ }
     }
     tick()
     const t = setInterval(tick, 1000)  // a 2.5 s poll added ~1 s to every answer
-    return () => { alive = false; clearInterval(t); stopMic.current(); stopSpeech.current(); speechSynthesis?.cancel() }
+    return () => { alive = false; clearInterval(t); stopMic.current(); stopSpeech.current(); window.speechSynthesis?.cancel() }
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   function setMood(m: Mood) {
@@ -116,15 +141,28 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
     }
   }
 
-  // said the moment you finish, so there's no dead air while he thinks (his real answer takes several seconds)
-  const ack = useRef<Promise<ArrayBuffer | null> | null>(null)
-  const loadAck = () => ack.current ??= fetch('/api/jharvis/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: 'One moment, sir.' }) })
-      .then(r => r.ok ? r.arrayBuffer() : null).catch(() => null)
-  useEffect(() => { loadAck() }, [])  // made once up front (VoiceStudio needs ~3 s), so it plays instantly
-  async function acknowledge() {
+  // A short filler the moment you finish, so there's no dead air while he thinks. Jhon (29 Oct): the same "One moment,
+  // sir" every time was annoying, so it fits the ask, never repeats back to back, and is skipped for small talk and
+  // while a conversation is flowing.
+  const acks = useRef(new Map<string, Promise<ArrayBuffer | null>>())
+  const lastAck = useRef({ text: '', at: 0 })
+  const loadAck = (text: string) => {
+    if (!acks.current.has(text)) acks.current.set(text, fetch('/api/jharvis/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) })
+      .then(r => r.ok ? r.arrayBuffer() : null).catch(() => null))
+    return acks.current.get(text)!
+  }
+  useEffect(() => {  // made one after another up front (VoiceStudio needs ~3 s each), so they play instantly
+    let i = 0
+    const next = () => { const t = ACKS_ALL[i++]; if (t) loadAck(t).then(next) }
+    next()
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  async function acknowledge(m: string) {
     if (mutedRef.current) return
-    const data = await loadAck()
-    if (!data) { ack.current = null; return }
+    const text = pickAck(m, lastAck.current)
+    if (!text) return
+    lastAck.current = { text, at: Date.now() }
+    const data = await loadAck(text)
+    if (!data) { acks.current.delete(text); return }
     const c = ctx(), src = c.createBufferSource()
     src.buffer = await c.decodeAudioData(data.slice(0))
     src.connect(c.destination); src.start()
@@ -132,10 +170,11 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
 
   async function send(m: string) {
     if (!m.trim()) return
-    acknowledge()
+    acknowledge(m)
     setError(null); setStatus('thinking'); setSubtitle(m)
+    askedHere.current = true
     try {
-      const r = await fetch('/api/jharvis/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'owner', text: m.trim() }) })
+      const r = await fetch('/api/jharvis/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ role: 'owner', text: m.trim(), client: IS_PHONE ? 'phone' : 'pc' }) })
       if (!r.ok) throw new Error(`Request failed (${r.status})`)
       seen.current?.add((await r.json() as Msg).id)
     } catch (err) { setStatus('idle'); setError((err as Error).message); setConversation(false) }
@@ -153,7 +192,7 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
   }
 
   async function listen() {
-    setError(null); stopSpeech.current(); speechSynthesis?.cancel()
+    setError(null); stopSpeech.current(); window.speechSynthesis?.cancel()
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const c = ctx()
@@ -213,7 +252,7 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
     const next = !muted
     setMuted(next)
     try { localStorage.setItem('jharvis-muted', next ? 'on' : 'off') } catch { /* private mode */ }
-    if (next) { speechSynthesis?.cancel(); stopSpeech.current() }
+    if (next) { window.speechSynthesis?.cancel(); stopSpeech.current() }
   }
 
   const roundBtn = 'flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full border border-white/70 bg-white/40 text-ink-2 backdrop-blur-md transition-colors hover:bg-white/70 hover:text-ink'
@@ -239,9 +278,9 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample }:
         <button onClick={() => setTyping(t => !t)} aria-pressed={typing} aria-label="Type instead" className={roundBtn}><Keyboard size={18} /></button>
         <button onClick={toggleMic} aria-pressed={handsFree} aria-label={handsFree ? 'End the conversation' : 'Talk'}
           title={handsFree ? 'Talking hands-free. Tap to end.' : 'Tap once, then just talk'}
-          className={`relative flex h-16 w-16 cursor-pointer items-center justify-center rounded-full border transition-transform active:scale-95 ${handsFree ? 'chrome border-transparent' : 'border-white/80 bg-white/50 text-ink backdrop-blur-md hover:bg-white/80'}`}>
+          className={`relative flex ${big ? 'h-24 w-24' : 'h-16 w-16'} cursor-pointer items-center justify-center rounded-full border transition-transform active:scale-95 ${handsFree ? 'chrome border-transparent' : 'border-white/80 bg-white/50 text-ink backdrop-blur-md hover:bg-white/80'}`}>
           {status === 'listening' && <span className="absolute inset-0 animate-ping rounded-full border-2 border-glacier/60" aria-hidden="true" />}
-          {handsFree ? <Stop size={22} weight="fill" /> : <Microphone size={24} />}
+          {handsFree ? <Stop size={big ? 30 : 22} weight="fill" /> : <Microphone size={big ? 36 : 24} />}
         </button>
         <button onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'Unmute Jharvis' : 'Mute Jharvis'} className={roundBtn}>
           {muted ? <SpeakerSlash size={18} /> : <SpeakerHigh size={18} />}

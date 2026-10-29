@@ -81,8 +81,8 @@ export function AgentLogo({ name, size = 28 }: { name: string; size?: number }) 
 }
 
 /** Pill toggles for choosing one or several agents. */
-export function AgentPicker<T extends string>({ value, onChange, multi = false, legend, only, disabled }: { value: T[]; onChange: (v: T[]) => void; multi?: boolean; legend: string; only?: string[]; disabled?: boolean }) {
-  const all = Object.keys(AGENT_META).filter(a => !only || only.includes(a)) as T[]
+export function AgentPicker<T extends string>({ value, onChange, multi = false, legend, only, disabled, extra = {} }: { value: T[]; onChange: (v: T[]) => void; multi?: boolean; legend: string; only?: string[]; disabled?: boolean; extra?: Record<string, { label: string }> }) {
+  const all = [...Object.keys(extra), ...Object.keys(AGENT_META).filter(a => !only || only.includes(a))] as T[]  // extra: page-only choices like Chats' Smart
   return (
     <fieldset disabled={disabled} className="flex flex-wrap gap-2 disabled:opacity-50">
       <legend className="mb-2 text-sm font-medium text-ink">{legend}</legend>
@@ -92,7 +92,7 @@ export function AgentPicker<T extends string>({ value, onChange, multi = false, 
           <button type="button" key={a} aria-pressed={on}
             onClick={() => onChange(multi ? (on ? value.filter(v => v !== a) : [...value, a]) : [a])}
             className={`flex min-h-11 cursor-pointer items-center gap-2 rounded-full border py-1 pl-1.5 pr-4 text-sm transition-colors duration-200 ${on ? 'border-navy bg-navy text-white' : 'border-white bg-white/60 text-ink-2 hover:bg-white'}`}>
-            <AgentLogo name={a} size={26} />{AGENT_META[a].label}
+            <AgentLogo name={a} size={26} />{extra[a]?.label ?? AGENT_META[a].label}
           </button>
         )
       })}

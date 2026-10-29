@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Agentic OS</string>
+    <string name="talk">Talk to Jharvis</string>
+    <string name="approvals">Approvals</string>
+    <string name="chat">New chat</string>
+</resources>

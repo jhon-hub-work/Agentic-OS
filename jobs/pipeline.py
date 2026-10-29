@@ -268,7 +268,11 @@ def run(run_agent, log=print, after=None) -> dict:
     applyable = lambda j: "onlinejobs.ph" in j["url"] or any(h in j["url"] for h in ("greenhouse.io", "lever.co", "ashbyhq.com"))
     queue = [j for j in board["jobs"] if j["status"] == "queued"] + [j for j in new_items if j["status"] == "queued"]
     for item in sorted(queue, key=lambda j: (applyable(j), j.get("score") or 0), reverse=True)[:MAX_DRAFT]:
-        text = draft(item, run_agent, cv, answers)
+        try:
+            text = draft(item, run_agent, cv, answers)
+        except RuntimeError as e:  # the OS's Claude guard: the rest stay queued for the next run
+            stats["errors"].append(f"drafting: {e}")
+            break
         problem = leaks(text)
         result = dict(draft=text, status="draft_blocked" if problem else "drafted", problem=problem)
         if item in new_items:

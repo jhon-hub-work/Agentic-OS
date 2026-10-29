@@ -148,10 +148,15 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(status, 403, f"host accepted: {host}")
 
     def test_local_ip_and_tailscale_hosts_allowed(self):
-        for host in ["127.0.0.1:8810", "localhost:8810", "[::1]:8810", "192.168.1.5:8810",
-                     "100.64.0.7", "pc.tail1234.ts.net", "pc.tail1234.ts.net:8810"]:
+        for host in ["127.0.0.1:8810", "localhost:8810", "[::1]:8810", "192.168.1.5:8810", "100.64.0.7"]:
             status, _ = self.h.api("GET", "/api/status", headers={"Host": host})
             self.assertEqual(status, 200, f"host rejected: {host}")
+        # Tailscale Serve relays the phone from 127.0.0.1: a .ts.net or forwarded request is remote and needs the token
+        for headers in [{"Host": "pc.tail1234.ts.net"}, {"Host": "pc.tail1234.ts.net:8810"}, {"X-Forwarded-For": "100.101.1.2"}]:
+            status, _ = self.h.api("GET", "/api/status", headers=headers)
+            self.assertEqual(status, 401, f"relayed request skipped the token: {headers}")
+            status, _ = self.h.api("GET", "/api/status", headers={**headers, "Authorization": f"Bearer {__import__('server').AUTH_TOKEN}"})
+            self.assertEqual(status, 200, f"host rejected: {headers}")
 
     def test_cross_site_write_rejected(self):
         for origin in ["http://evil.example", "null", "http://127.0.0.1.evil.example"]:
@@ -182,6 +187,78 @@ class SecurityTests(unittest.TestCase):
         server.RedactTokenFilter().filter(rec)
         self.assertNotIn(server.AUTH_TOKEN, rec.getMessage())
         self.assertIn("token=REDACTED&x=1", rec.getMessage())
+
+    def test_phone_pairing(self):
+        import json
+        import urllib.error
+        import urllib.request
+        import server
+        remote = {"Host": "pc.tail1234.ts.net:8810"}  # relayed by Tailscale Serve: not the PC
+
+        def pair(token):
+            req = urllib.request.Request(self.h.base_url + "/api/pair", data=json.dumps({"token": token}).encode(),
+                                         method="POST", headers={"Content-Type": "application/json", **remote})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    return r.status, r.headers.get("set-cookie", "")
+            except urllib.error.HTTPError as e:
+                return e.code, e.headers.get("set-cookie", "")
+        # assertTrue, not assertIn: a failure message must never print the real token
+        status, cookie = pair(server.AUTH_TOKEN)
+        self.assertEqual(status, 200)
+        self.assertTrue(f"aos_token={server.AUTH_TOKEN};" in cookie, "right token set no cookie")
+        for flag in ("httponly", "secure", "samesite=strict"):
+            self.assertIn(flag, cookie.lower())
+        status, cookie = pair("wrong" + server.AUTH_TOKEN)
+        self.assertEqual(status, 401)
+        self.assertNotIn("aos_token", cookie)
+        # the pairing link carries the token: only for the PC's own screen, never a phone (paired or not)
+        self.assertEqual(self.h.request("GET", "/api/pair/link", headers=remote)[0], 401)
+        self.assertEqual(self.h.request("GET", "/api/pair/link", headers={**remote, "Authorization": f"Bearer {server.AUTH_TOKEN}"})[0], 403)
+        self.assertIn(self.h.request("GET", "/api/pair/link")[0], (200, 503))  # 503 = no Tailscale on this machine
+        # an unpaired phone gets the app shell and PWA files (to read #pair), never data
+        for path in ("/", "/manifest.json", "/sw.js"):
+            self.assertEqual(self.h.request("GET", path, headers=remote)[0], 200, path)
+        self.assertEqual(self.h.request("GET", "/api/approvals", headers=remote)[0], 401)
+
+    def test_pairing_code(self):
+        import server
+        remote = {"Host": "pc.tail1234.ts.net:8810"}
+
+        def pair(code):
+            status, _ = self.h.request("POST", "/api/pair", {"code": code}, headers=remote)
+            return status
+
+        def new_code():
+            status, body = self.h.api("GET", "/api/pair/code")
+            self.assertEqual(status, 200)
+            return body["code"]
+        # a phone never gets a code, paired or not
+        self.assertEqual(self.h.request("GET", "/api/pair/code", headers=remote)[0], 401)
+        self.assertEqual(self.h.request("GET", "/api/pair/code", headers={**remote, "Authorization": f"Bearer {server.AUTH_TOKEN}"})[0], 403)
+        self.assertEqual(pair(""), 401)  # no code made yet / empty code
+        # works once (assertTrue: a failure message must never print a code)
+        code = new_code()
+        self.assertTrue(len(code) == 6 and code.isdigit(), "code is not 6 digits")
+        status, _ = self.h.request("POST", "/api/pair", {"code": code}, headers=remote)
+        self.assertEqual(status, 200)
+        self.assertEqual(pair(code), 401)
+        # expires
+        code = new_code()
+        server._pair_code["expires"] = 0
+        self.assertEqual(pair(code), 401)
+        # 5 wrong tries void it, even for the right code afterwards
+        code = new_code()
+        wrong = f"{(int(code) + 1) % 10**6:06d}"
+        for _ in range(5):
+            self.assertEqual(pair(wrong), 401)
+        self.assertEqual(pair(code), 401)
+        # 4 wrong tries leave it usable
+        code = new_code()
+        wrong = f"{(int(code) + 1) % 10**6:06d}"
+        for _ in range(4):
+            pair(wrong)
+        self.assertEqual(pair(code), 200)
 
     def test_job_approve_only_from_approvable_states(self):
         import jobs.pipeline as pipeline

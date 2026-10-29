@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the icon. Same routes as the web app's manifest shortcuts (server.py MANIFEST_JSON). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="talk" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/talk">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="com.jhon.agenticos" android:targetClass="com.jhon.agenticos.MainActivity"
+            android:data="https://desktop-tge4frg.tailcb1411.ts.net:8810/#/home" />
+    </shortcut>
+    <shortcut android:shortcutId="approvals" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/approvals">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="com.jhon.agenticos" android:targetClass="com.jhon.agenticos.MainActivity"
+            android:data="https://desktop-tge4frg.tailcb1411.ts.net:8810/#/approvals" />
+    </shortcut>
+    <shortcut android:shortcutId="chat" android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/chat">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="com.jhon.agenticos" android:targetClass="com.jhon.agenticos.MainActivity"
+            android:data="https://desktop-tge4frg.tailcb1411.ts.net:8810/#/chats" />
+    </shortcut>
+</shortcuts>

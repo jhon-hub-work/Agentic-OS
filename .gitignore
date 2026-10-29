@@ -26,6 +26,8 @@ data/team/
 data/sessions/
 data/jobs/
 data/server.log
+data/watchdog.log*
+data/watchdog.lock
 data/jharvis/
 jobs/private_terms.txt
 PLAN.md
@@ -43,3 +45,6 @@ data/reauth.json
 data/tickets/
 data/sessions/_deleted/
 data/scheduler-history.torn-*.json
+data/skill-lab/
+data/chat-index.json
+desktop/installer/

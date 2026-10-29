@@ -69,6 +69,94 @@ class ChatHistoryTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(data["total"], 2)
 
+    def test_reopen_keeps_the_open_chat(self):
+        # 29 Oct bug: reopening an old chat rewrote the archive from a copy read before the open chat was filed away
+        server.save_chat_message({"id": "ra", "role": "user", "agent": "codex", "content": "chat A line", "timestamp": "2026-10-29T01:00:00Z"})
+        a = server.current_chat_id("codex")
+        server.clear_chat("codex")
+        server.save_chat_message({"id": "rb", "role": "user", "agent": "codex", "content": "chat B line", "timestamp": "2026-10-29T02:00:00Z"})
+        server.open_chat("codex", a)
+        archived = [m["content"] for m in server._read_archive() if m.get("agent") == "codex"]
+        self.assertIn("chat B line", archived)
+        self.assertNotIn("chat A line", archived)  # A is open again, not in the archive twice
+
+    def test_new_chat_and_reopen(self):
+        # /clear on a non-live agent starts a new chat (never reaches the CLI); the old one is listed and reopens
+        self._seed_message("first chat line", "agy")
+        status, data = self.h.api("POST", "/api/chat", {"agent": "agy", "message": "/clear"})
+        self.assertEqual((status, data["status"]), (200, "cleared"))
+        _, data = self.h.api("GET", "/api/chat/history?agent=agy")
+        self.assertEqual(data["total"], 0)
+        _, data = self.h.api("GET", "/api/chat/list?agent=agy")
+        old = [c for c in data["chats"] if c["title"] == "first chat line"]
+        self.assertEqual(len(old), 1)
+        self.assertTrue(data["chats"][0]["current"])
+        server.chat_session_file("claude").write_text("sess-a")
+        server.save_chat_message({"id": "c1", "role": "user", "agent": "claude", "content": "claude chat", "timestamp": "2026-10-29T01:00:00Z"})
+        server.clear_chat("claude")
+        self.assertFalse(server.chat_session_file("claude").exists())
+        claude_old = server.list_chats("claude")[1]["id"]
+        status, _ = self.h.api("POST", "/api/chat/open", {"agent": "claude", "chat": claude_old})
+        self.assertEqual(status, 200)
+        self.assertEqual(server.chat_session_file("claude").read_text(), "sess-a")  # its own memory comes back
+        status, _ = self.h.api("POST", "/api/chat/open", {"agent": "agy", "chat": old[0]["id"]})
+        self.assertEqual(status, 200)
+        _, data = self.h.api("GET", "/api/chat/history?agent=agy")
+        self.assertEqual([m["content"] for m in data["messages"]], ["first chat line"])
+        status, _ = self.h.api("POST", "/api/chat/open", {"agent": "agy", "chat": "../x"})
+        self.assertEqual(status, 400)
+
+    def _two_chats(self, agent):
+        # an earlier chat about bananas, and the open one about apples
+        server.save_chat_message({"id": "b1", "role": "user", "agent": agent, "content": "tell me about bananas", "timestamp": "2026-10-29T01:00:00Z"})
+        server.save_chat_message({"id": "b2", "role": "assistant", "agent": agent, "content": "Bananas are rich in potassium.", "timestamp": "2026-10-29T01:01:00Z"})
+        server.clear_chat(agent)
+        server.save_chat_message({"id": "a1", "role": "user", "agent": agent, "content": "apples please", "timestamp": "2026-10-29T02:00:00Z"})
+        chats = server.list_chats(agent)
+        return chats[1]["id"], chats[0]["id"]
+
+    def test_chat_search_rename_delete(self):
+        old, cur = self._two_chats("gemini")
+        # search finds message text, not only titles, with a snippet
+        _, data = self.h.api("GET", "/api/chat/list?agent=gemini&q=POTASSIUM")
+        self.assertEqual([c["id"] for c in data["chats"]], [old])
+        self.assertIn("potassium", data["chats"][0]["snippet"])
+        _, data = self.h.api("GET", "/api/chat/list?agent=gemini&q=nothing-like-this")
+        self.assertEqual(data["chats"], [])
+        # rename: the list shows the name, and search matches it
+        status, _ = self.h.api("POST", "/api/chat/rename", {"agent": "gemini", "chat": old, "name": "  Fruit facts "})
+        self.assertEqual(status, 200)
+        _, data = self.h.api("GET", "/api/chat/list?agent=gemini&q=fruit")
+        self.assertEqual([(c["id"], c["title"]) for c in data["chats"]], [(old, "Fruit facts")])
+        status, _ = self.h.api("POST", "/api/chat/rename", {"agent": "gemini", "chat": "nope", "name": "x"})
+        self.assertEqual(status, 404)
+        # delete an earlier chat: gone from the list and archive, kept in chat-deleted.jsonl, its CLI session dropped
+        index = server._chat_index()
+        index["sessions"][old] = "sess-old"
+        server._save_chat_index(index)
+        status, _ = self.h.api("POST", "/api/chat/delete", {"agent": "gemini", "chat": old})
+        self.assertEqual(status, 200)
+        self.assertNotIn(old, [c["id"] for c in server.list_chats("gemini")])
+        self.assertNotIn(old, server._chat_index()["sessions"])
+        self.assertNotIn(old, server._chat_index()["titles"])
+        deleted = [json.loads(l) for l in server.CHAT_HISTORY_FILE.with_name("chat-deleted.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(sorted(m["id"] for m in deleted if m["chat"] == old), ["b1", "b2"])
+        self.assertTrue(all(m.get("deleted_at") for m in deleted))
+        status, _ = self.h.api("POST", "/api/chat/delete", {"agent": "gemini", "chat": old})
+        self.assertEqual(status, 404)
+        # delete the open chat: a new empty chat opens, messages saved, CLI session gone
+        server.chat_session_file("claude").write_text("sess-cur")
+        server.save_chat_message({"id": "c9", "role": "user", "agent": "claude", "content": "open chat line", "timestamp": "2026-10-29T03:00:00Z"})
+        cur = server.current_chat_id("claude")
+        status, _ = self.h.api("POST", "/api/chat/delete", {"agent": "claude", "chat": cur})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(server.current_chat_id("claude"), cur)
+        self.assertFalse(server.chat_session_file("claude").exists())
+        _, data = self.h.api("GET", "/api/chat/history?agent=claude")
+        self.assertEqual(data["total"], 0)
+        deleted = server.CHAT_HISTORY_FILE.with_name("chat-deleted.jsonl").read_text(encoding="utf-8")
+        self.assertIn("open chat line", deleted)
+
 
 class ChatUploadTests(unittest.TestCase):
     @classmethod
@@ -545,6 +633,7 @@ class ReviewFixTests(unittest.TestCase):
         sess = {"id": "abcdef14", "title": "t", "agents": ["claude", "opencode"], "rounds": 2, "round": 0, "judge": True,
                 "working": [], "status": "running", "messages": [{"role": "user", "agent": None, "round": 0, "content": "q"}]}
         with mock.patch.object(server, "execute_agent", return_value="idea\nDONE"), \
+             mock.patch.object(server, "bg_agent", return_value="claude"), \
              mock.patch.object(server, "run_cli", return_value=(0, json.dumps({"result": "Do X. Why: best.", "usage": {}}), "")) as cli:
             server.run_session(sess)
         s = server.get_session("abcdef14")

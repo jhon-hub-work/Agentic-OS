@@ -2,6 +2,7 @@ import { Plug, Plus } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
 import { AGENT_META, api, loadAgents, type AgentName, type ModelChoice, type Plugin } from '../api'
 import { AgentLogo, AgentPicker, ChromeButton, Field, ModelPick, PageHead, Panel, Skeleton, inputCls, useModelInfo } from '../ui'
+import { PairPhone } from '../Phone'
 
 const MCP_AGENTS = ['claude', 'opencode', 'hermes', 'agy']  // added agents have no MCP command
 
@@ -19,6 +20,8 @@ export default function Agents() {
       <Panel className="mb-5"><Models /></Panel>
       <Panel className="mb-5"><Plugins /></Panel>
       <Panel className="mb-5"><AddConnection onAdded={load} /></Panel>
+      {/* the QR carries the token: only on the PC's own screen (the server refuses anyone else too) */}
+      {['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) && <Panel className="mb-5"><PairPhone /></Panel>}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {MCP_AGENTS.map(a => (
           <Panel key={a}>

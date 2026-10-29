@@ -118,7 +118,15 @@ AUTH_TOKEN = AUTH_TOKEN_FILE.read_text().strip()
 ALLOWED_HOST_RE = re.compile(r"^(localhost|\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:.]+\]|[a-z0-9.-]+\.ts\.net)(:\d+)?$")
 
 def is_loopback(request) -> bool:
+    """The PC itself. Tailscale Serve (the phone's https link) relays from 127.0.0.1 too, so a forwarded request counts as remote."""
+    h = getattr(request, "headers", None) or {}
+    if h.get("x-forwarded-for") or h.get("tailscale-user-login") or h.get("host", "").split(":")[0].lower().endswith(".ts.net"):
+        return False
     return bool(request.client) and request.client.host in ("127.0.0.1", "::1")
+
+# No token needed: the app shell, PWA files and the pairing exchange load before an unpaired phone has its cookie
+# (the page reads #pair=<token> and trades it on /api/pair). No data in any of them; every other /api route still asks.
+PUBLIC_PATHS = {"/", "/manifest.json", "/sw.js", "/logo.svg", "/favicon.ico", "/favicon.svg", "/api/pair"}
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -136,6 +144,8 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
                  or request.cookies.get("aos_token")
                  or request.headers.get("authorization", "").removeprefix("Bearer "))
         if not secrets_compare(given, AUTH_TOKEN):
+            if request.url.path in PUBLIC_PATHS or request.url.path.startswith(("/assets/", "/icons/")):
+                return await call_next(request)
             return Response("Unauthorized", status_code=401)
         response = await call_next(request)
         if request.query_params.get("token"):
@@ -635,10 +645,10 @@ def run_scheduled(job: dict, trigger: str):
     try:
         if kind == "jobs":
             out = json.dumps(run_job_pipeline())
-        elif kind == "agent":
-            out = execute_agent(job["agent"], job["prompt"])
+        elif kind == "agent":  # a scheduled Claude job keeps Claude only while the guard allows it
+            out = execute_agent(job["agent"] if job["agent"] != "claude" or not claude_guard() else BACKGROUND_DEFAULT, job["prompt"])
         elif kind == "team":
-            out = f"Team run {start_team(TeamRequest(message=job['prompt'], agent=job.get('agent', 'claude')))['id']} started"
+            out = f"Team run {start_team(TeamRequest(message=job['prompt'], agent=job.get('agent', 'claude'), background=True))['id']} started"
         else:
             out = run_skill(job["skill"], SkillRunRequest(input=job.get("prompt", ""), agent=job.get("agent", "auto")))["output"]
     except Exception as e:
@@ -659,12 +669,18 @@ def run_scheduled(job: dict, trigger: str):
 
 _jobs_lock = threading.Lock()
 
+def job_agent(agent: str, prompt: str) -> str:
+    """The job search's agent calls: Claude drafting only under the guard, else it waits (his CV never goes to a free model)."""
+    if agent == "claude" and (why := claude_guard()):
+        raise RuntimeError(f"{why}: drafting waits for the next run")
+    return execute_agent(agent, prompt)
+
 def run_job_pipeline() -> dict:
     from jobs import pipeline
     if not _jobs_lock.acquire(blocking=False):
         return {"skipped": "a job run is already going"}
     try:
-        stats = pipeline.run(execute_agent, log=lambda m: print(f"[jobs] {m}"),
+        stats = pipeline.run(job_agent, log=lambda m: print(f"[jobs] {m}"),
                              after=auto_apply_clean if owner.OWNER.get("auto_apply") else None)
         stats["followed_up"] = run_followups()
         append_audit({"action": "jobs_run", "output_preview": f"{stats['drafted']} drafted, {stats['auto_sent']} sent, {stats['followed_up']} followed up, {stats['needs_you']} need {owner.NAME}"})
@@ -677,7 +693,7 @@ def run_job_pipeline() -> dict:
 def _run_person(pid: str) -> dict:
     """One person's search, then their clean drafts go out from their own Brave (config/owner.json people.<id>)."""
     try:
-        stats = people.run(pid, execute_agent, log=lambda m: print(f"[jobs:{pid}] {m}"))
+        stats = people.run(pid, job_agent, log=lambda m: print(f"[jobs:{pid}] {m}"))
         stats["auto_sent"] = auto_apply_clean(pid) if people.PEOPLE[pid].get("auto_apply") else 0
     except Exception as e:  # noqa: BLE001 - one person's run must not stop the others
         return {"errors": [f"run failed: {e!r}"]}
@@ -805,7 +821,11 @@ def run_followups() -> int:
     from jobs import pipeline
     sent = 0
     for j in pipeline.followups_due():
-        text = pipeline.draft_followup(j, execute_agent)
+        try:
+            text = pipeline.draft_followup(j, job_agent)
+        except RuntimeError as e:  # the Claude guard: follow-ups wait for the next run
+            print(f"[jobs] follow-ups: {e}")
+            break
         problem = pipeline.leaks(text)
         if problem or "reddit.com/" not in j["url"] or not owner.OWNER.get("auto_apply"):
             pipeline.set_fields(j["id"], follow_up="due", followup_draft=text, followup_problem=problem)
@@ -846,6 +866,11 @@ def auto_apply_clean(who: str = "") -> int:
         if why:
             pipeline.set_fields(j["id"], path, status="needs_you", needs_you=True, needs_why=why)
             continue
+        # company forms (Greenhouse, Lever...) are filled by Claude (apply_runner.claude_json): over the guard they wait
+        # as drafts for the next run; OnlineJobs sends use no model and still go
+        if "onlinejobs.ph" not in j["url"] and (block := claude_guard()):
+            print(f"[jobs] auto-apply {j['id']}: {block}, left as a draft")
+            continue
         try:
             pipeline.decide(j["id"], "approve", path)
         except pipeline.StateError:  # the owner skipped it or it is already going
@@ -861,6 +886,13 @@ class JharvisMessage(BaseModel):
     text: str
     role: str = "owner"   # "owner" from the dashboard, "jharvis" from Jharvis (its Slack posts are mirrored here)
     mood: str = "normal"  # Jharvis's reply tone: normal | good | urgent (colours the waves)
+    client: str = ""      # "phone" | "pc": which device the owner wrote from
+
+_phone_used = {"at": 0.0}  # the PC's wake word stays quiet while Jhon talks to Jharvis on his phone (29 Oct)
+
+@app.get("/api/jharvis/phone-active")
+def jharvis_phone_active(seconds: int = Query(120, ge=1, le=3600)):
+    return {"active": time.time() - _phone_used["at"] < seconds}
 
 JHARVIS_PANELS = BASE_DIR / "data" / "jharvis" / "panels.json"
 
@@ -1022,6 +1054,8 @@ def jharvis_post(msg: JharvisMessage):
     """The dashboard backup channel: the owner talks to Jharvis here too, in case Slack fails."""
     if msg.role not in ("owner", "jharvis") or not msg.text.strip() or len(msg.text) > 8000:
         raise HTTPException(400, "role must be owner or jharvis, text 1-8000 characters")
+    if msg.role == "owner" and msg.client == "phone":
+        _phone_used["at"] = time.time()
     with _msgs_lock:
         msgs = json.loads(JHARVIS_MSGS.read_text()) if JHARVIS_MSGS.exists() else []
         item = {"id": str(uuid.uuid4())[:8], "role": msg.role, "text": msg.text.strip(), "timestamp": get_timestamp(),
@@ -1288,6 +1322,14 @@ def update_settings(data: SettingsUpdate):
                 raise HTTPException(400, f"{key}: {{agent: text}} for known agents only")
             for a, v in picks.items():
                 check_pick(a, **{key[:-1]: v})
+    bg = data.settings.get("background", {})
+    if not isinstance(bg, dict) or any(j not in BACKGROUND_JOBS or a not in AGENTS for j, a in bg.items()):
+        raise HTTPException(400, f"background: {{job: agent}}, jobs {', '.join(BACKGROUND_JOBS)}")
+    if bg.get("jobs", "claude") != "claude":
+        raise HTTPException(400, "The job search reads the owner's CV: it stays on Claude")
+    lim = data.settings.get("claude_guard", {})
+    if not isinstance(lim, dict) or any(k not in GUARD_LIMITS or not isinstance(v, (int, float)) or not 0 <= v <= 100 for k, v in lim.items()):
+        raise HTTPException(400, "claude_guard: {five_hour, seven_day} as 0-100")
     existing.update(data.settings)
     write_atomic(sf, json.dumps(existing, indent=2))  # agent_model reads it on every agent call
     append_audit({"action": "settings_updated"})
@@ -1552,23 +1594,163 @@ def load_chat_history():
         CHAT_HISTORY_FILE.replace(CHAT_HISTORY_FILE.with_name(f"chat-history.bad-{int(time.time())}.json"))
         return {"messages": []}
 
+# Chat history (Jhon 29 Oct): chat-history.json holds each agent's open chat; earlier chats live in chat-archive.jsonl,
+# each message tagged with its chat id. chat-index.json = {"current": {agent: chat id}, "sessions": {chat id: CLI session id},
+# "titles": {chat id: name Jhon gave it}}. Deleted chats move to chat-deleted.jsonl, never erased.
+def _chat_index() -> dict:
+    f = CHAT_HISTORY_FILE.with_name("chat-index.json")
+    data = json.loads(f.read_text()) if f.exists() else {}
+    return {"current": data.get("current", {}), "sessions": data.get("sessions", {}), "titles": data.get("titles", {})}
+
+def _save_chat_index(index: dict):
+    write_atomic(CHAT_HISTORY_FILE.with_name("chat-index.json"), json.dumps(index, indent=2))
+
+def current_chat_id(agent: str) -> str:
+    with _chat_lock:
+        index = _chat_index()
+        if agent not in index["current"]:
+            index["current"][agent] = uuid.uuid4().hex[:8]
+            _save_chat_index(index)
+        return index["current"][agent]
+
+def _archive_path() -> Path:
+    return CHAT_HISTORY_FILE.with_name("chat-archive.jsonl")
+
+def _append_archive(msgs: list):
+    with open(_archive_path(), "a", encoding="utf-8") as f:
+        f.writelines(json.dumps(m) + "\n" for m in msgs)
+
+def _read_archive() -> list:
+    if not _archive_path().exists():
+        return []
+    out = []
+    for line in _archive_path().read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+def _chat_of(m: dict) -> str:
+    return m.get("chat") or f"old-{m.get('agent')}"  # archived before chats had ids: one "earlier" chat per agent
+
 def save_chat_message(msg: dict):
     with _chat_lock:
+        msg.setdefault("chat", current_chat_id(msg.get("agent", "")))
         history = load_chat_history()
         history.setdefault("messages", []).append(msg)
-        if len(history["messages"]) > 200:
+        if len(history["messages"]) > 200:  # the oldest go to the archive, still under their chat id, never dropped
+            _append_archive(history["messages"][:-200])
             history["messages"] = history["messages"][-200:]
         write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
 
 def clear_chat(agent: str):
-    """Takes an agent's messages off its thread; they're appended to data/chat-archive.jsonl, not deleted."""
+    """Starts a new chat: the open one goes to data/chat-archive.jsonl (with its CLI session, so it can be reopened)."""
     with _chat_lock:
+        old = current_chat_id(agent)
         history = load_chat_history()
-        gone = [m for m in history.get("messages", []) if m.get("agent") == agent]
-        with open(CHAT_HISTORY_FILE.with_name("chat-archive.jsonl"), "a", encoding="utf-8") as f:
-            f.writelines(json.dumps(m) + "\n" for m in gone)
+        _append_archive([{**m, "chat": m.get("chat") or old} for m in history.get("messages", []) if m.get("agent") == agent])
         history["messages"] = [m for m in history.get("messages", []) if m.get("agent") != agent]
         write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
+        index = _chat_index()
+        sf = chat_session_file(agent)
+        if sf and sf.exists():
+            index["sessions"][old] = sf.read_text().strip()
+            sf.unlink()
+        index["current"][agent] = uuid.uuid4().hex[:8]
+        _save_chat_index(index)
+    chat_context(agent, {})
+
+def open_chat(agent: str, chat: str):
+    """Makes an earlier chat the open one again; the open one is filed away first."""
+    with _chat_lock:
+        if chat == current_chat_id(agent):
+            return
+        archive = _read_archive()
+        back = [m for m in archive if m.get("agent") == agent and _chat_of(m) == chat]
+        if not back:
+            raise HTTPException(404, "Chat not found")
+        clear_chat(agent)  # files the open chat into the archive, so re-read it: a stale copy would wipe that chat
+        write_atomic(_archive_path(), "".join(json.dumps(m) + "\n" for m in _read_archive()
+                                              if not (m.get("agent") == agent and _chat_of(m) == chat)))
+        history = load_chat_history()
+        history.setdefault("messages", []).extend({**m, "chat": chat} for m in back)
+        write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
+        index = _chat_index()
+        index["current"][agent] = chat
+        sid = index["sessions"].pop(chat, "")
+        _save_chat_index(index)
+        if sid and chat_session_file(agent):  # Claude / Hermes pick up their own memory of that chat
+            chat_session_file(agent).write_text(sid)
+
+def list_chats(agent: str, q: str = "") -> list:
+    """The agent's chats, newest first: id, title (the name Jhon gave it, else the first thing he said), when, how many
+    messages, which is open. With q, only chats whose title or messages contain it, each with a snippet of the match."""
+    with _chat_lock:
+        cur = current_chat_id(agent)
+        titles = _chat_index()["titles"]
+        msgs = [m for m in _read_archive() if m.get("agent") == agent]
+        msgs += [{**m, "chat": cur} for m in load_chat_history().get("messages", []) if m.get("agent") == agent]
+    q = q.strip().lower()
+    chats = {}
+    for m in msgs:
+        c = chats.setdefault(_chat_of(m), {"id": _chat_of(m), "title": "", "updated": "", "count": 0, "current": _chat_of(m) == cur, "snippet": ""})
+        c["count"] += 1
+        c["updated"] = max(c["updated"], m.get("timestamp") or "")
+        text = m.get("content") or ""
+        if not c["title"] and m.get("role") == "user" and text:
+            c["title"] = text[:60]
+        at = text.lower().find(q) if q else -1
+        if at >= 0 and not c["snippet"]:
+            c["snippet"] = " ".join(text[max(0, at - 30):at + 60].split())
+    if cur not in chats:
+        chats[cur] = {"id": cur, "title": "", "updated": "", "count": 0, "current": True, "snippet": ""}
+    for c in chats.values():
+        c["title"] = titles.get(c["id"]) or c["title"]
+    found = [c for c in chats.values() if not q or c["snippet"] or q in c["title"].lower()]
+    return sorted(found, key=lambda c: (c["current"], c["updated"]), reverse=True)
+
+def rename_chat(agent: str, chat: str, name: str):
+    """Names a chat (an empty name goes back to the first message)."""
+    with _chat_lock:
+        if chat not in {c["id"] for c in list_chats(agent)}:
+            raise HTTPException(404, "Chat not found")
+        index = _chat_index()
+        if name.strip():
+            index["titles"][chat] = name.strip()[:80]
+        else:
+            index["titles"].pop(chat, None)
+        _save_chat_index(index)
+
+def delete_chat(agent: str, chat: str):
+    """Deletes a chat: its messages move to data/chat-deleted.jsonl (recoverable), its CLI session and name are dropped.
+    Deleting the open chat starts a new one."""
+    with _chat_lock:
+        is_open = chat == current_chat_id(agent)
+        archive = _read_archive()
+        old = [m for m in archive if m.get("agent") == agent and _chat_of(m) == chat]
+        history = load_chat_history()
+        live = [m for m in history.get("messages", []) if m.get("agent") == agent] if is_open else []
+        if not old and not live and not is_open:
+            raise HTTPException(404, "Chat not found")
+        stamp = get_timestamp()
+        with open(CHAT_HISTORY_FILE.with_name("chat-deleted.jsonl"), "a", encoding="utf-8") as f:  # saved before removing
+            f.writelines(json.dumps({**m, "chat": chat, "deleted_at": stamp}) + "\n" for m in old + live)
+        if old:
+            write_atomic(_archive_path(), "".join(json.dumps(m) + "\n" for m in archive if not (m.get("agent") == agent and _chat_of(m) == chat)))
+        index = _chat_index()
+        index["sessions"].pop(chat, None)
+        index["titles"].pop(chat, None)
+        if is_open:
+            history["messages"] = [m for m in history.get("messages", []) if m.get("agent") != agent]
+            write_atomic(CHAT_HISTORY_FILE, json.dumps(history, indent=2))
+            sf = chat_session_file(agent)
+            if sf and sf.exists():
+                sf.unlink()
+            index["current"][agent] = uuid.uuid4().hex[:8]
+        _save_chat_index(index)
+    if is_open:
+        chat_context(agent, {})
 
 def resolve_cli(name: str) -> str:
     # npm gives opencode a .cmd wrapper, which would pass the message through cmd.exe parsing; call the real exe.
@@ -1631,9 +1813,10 @@ def clean_hermes_output(raw: str) -> str:
                 content_lines.append(cleaned)
     if content_lines:
         return '\n'.join(content_lines)
-    # Fallback: if no box found, return last non-metadata line
-    non_meta = [l.strip() for l in lines if l.strip() and not l.startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:', 'Duration:', 'Messages:'))]
-    return '\n'.join(non_meta[-5:]) or raw
+    # Fallback: no box (hermes -z prints the bare reply): the whole reply minus CLI metadata. It once kept only the
+    # last 5 lines, which cut multi-line answers like JSON in half (29 Oct).
+    non_meta = [l.rstrip() for l in lines if l.strip() and not l.startswith(('Query:', 'Initializing', '──', 'Resume', 'Session:', 'Duration:', 'Messages:'))]
+    return '\n'.join(non_meta) or raw
 
 def agent_model(agent: str, default: str) -> str:
     sf = BASE_DIR / "data" / "settings.json"
@@ -1687,15 +1870,204 @@ def model_flags(agent: str, model: str, effort: str) -> list:
             flags += [p.replace(slot, value) for p in split_command(custom[key])]
     return flags
 
+# ─── Claude guard (Jhon 29 Oct, Max -> Pro): the OS's own background work never eats his Claude limits ────────
+# Background jobs run on a free agent unless settings.json "background" says "claude" for that job; even then Claude
+# only runs while the 5-hour window and the week are under the limits below. Chats Jhon starts himself are never blocked.
+BACKGROUND_JOBS = ("verdict", "self_review", "ticket_plan", "jobs", "fallback")  # scheduled jobs keep their agent, Claude under the guard
+BACKGROUND_DEFAULT = "hermes"  # free (OpenRouter free models); per-job choice in settings.json "background": {job: agent}
+# the job search reads Jhon's CV and profile: free models may log prompts, so it stays on Claude (under the guard)
+BACKGROUND_PICKS = {"jobs": "claude", "ticket_plan": "opencode"}  # Hermes can't read code (design/free-model-eval.md)
+GUARD_LIMITS = {"five_hour": 50, "seven_day": 80}  # % used; settings.json "claude_guard" overrides
+_usage_cache = {"at": 0.0, "data": None}
+
+def claude_usage() -> Optional[dict]:
+    """{"five_hour": %, "seven_day": %} from Anthropic with the Claude Code login (sent to Anthropic only); cached 5 min."""
+    if time.time() - _usage_cache["at"] < 300:
+        return _usage_cache["data"]
+    data = None
+    try:
+        oauth = json.loads((Path.home() / ".claude" / ".credentials.json").read_text(encoding="utf-8"))["claudeAiOauth"]
+        if oauth.get("expiresAt", 0) / 1000 > time.time() + 60:
+            req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+                "Authorization": f"Bearer {oauth['accessToken']}", "anthropic-beta": "oauth-2025-04-20"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                payload = json.load(r)
+            data = {k: float((payload.get(k) or {}).get("utilization") or 0) for k in GUARD_LIMITS}
+    except (OSError, ValueError, KeyError):
+        pass
+    _usage_cache.update(at=time.time(), data=data)
+    return data
+
+def claude_guard() -> Optional[str]:
+    """Why background Claude must not run now, or None when it may. Unknown usage counts as no."""
+    sf = BASE_DIR / "data" / "settings.json"
+    limits = {**GUARD_LIMITS, **((json.loads(sf.read_text()) if sf.exists() else {}).get("claude_guard") or {})}
+    used = claude_usage()
+    if used is None:
+        return "Claude usage unknown"
+    over = [f"{k.replace('_', '-')} at {used[k]:.0f}% (limit {limits[k]}%)" for k in limits if used[k] >= limits[k]]
+    return "Claude " + ", ".join(over) if over else None
+
+def bg_agent(job: str, wanted: str = "claude") -> str:
+    """The agent a background job runs on: a non-Claude choice stands; Claude only if allowed for this job and under the guard."""
+    if wanted != "claude":
+        return wanted
+    sf = BASE_DIR / "data" / "settings.json"
+    pick = ((json.loads(sf.read_text()) if sf.exists() else {}).get("background") or {}).get(job, BACKGROUND_PICKS.get(job, BACKGROUND_DEFAULT))
+    if pick == "claude" and (why := claude_guard()):
+        print(f"[guard] {job}: {why}, using {BACKGROUND_DEFAULT}")
+        return BACKGROUND_DEFAULT
+    return pick
+
+@app.get("/api/claude-guard")
+def claude_guard_state():
+    sf = BASE_DIR / "data" / "settings.json"
+    settings = json.loads(sf.read_text()) if sf.exists() else {}
+    picked = settings.get("background") or {}
+    return {"usage": claude_usage(), "blocked": claude_guard(), "default": BACKGROUND_DEFAULT,
+            "limits": {**GUARD_LIMITS, **(settings.get("claude_guard") or {})},
+            "jobs": {j: {"picked": picked.get(j, BACKGROUND_PICKS.get(j, BACKGROUND_DEFAULT)), "now": bg_agent(j)} for j in BACKGROUND_JOBS}}
+
+# Free tiers run out (OpenCode Zen, OpenRouter's 50 free requests a day): an agent that hits its limit rests until its
+# reset, the next free agent takes the work, and when all are out the caller gets ALL_LIMITED and can come back later.
+FREE_AGENTS = ("opencode", "hermes")
+ALL_LIMITED = "All free agents are at their limit"
+LIMIT_RE = re.compile(r"free.?(usage.?)?limit|\b429\b|rate.?limit|quota", re.I)
+_resting: dict = {}  # agent -> time it may be tried again
+
+def _rest_seconds(out: str) -> int:
+    """'retry in 10h42m31s' / 'resets at 17:00 (in 2h 55m)' in the error, else an hour."""
+    m = re.search(r"(?:retry (?:in|after)|\(in)[: ]*(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?", out, re.I)
+    secs = (int(m[1] or 0) * 3600 + int(m[2] or 0) * 60 + int(m[3] or 0)) if m else 0
+    return min(max(secs, 300), 24 * 3600) if secs else 3600
+
+def free_again_at() -> float:
+    """When the first resting free agent may be tried again."""
+    return min((_resting.get(a, 0) for a in FREE_AGENTS), default=time.time())
+
+def _limited(agent: str, out: str) -> bool:
+    if agent in FREE_AGENTS and out.startswith(f"{agent} failed") and LIMIT_RE.search(out):
+        _resting[agent] = time.time() + _rest_seconds(out)
+        print(f"[agents] {agent} hit its free limit, resting until {datetime.fromtimestamp(_resting[agent]):%H:%M}")
+        return True
+    return False
+
+# ─── Every agent's limits (Jhon 29 Oct): Billing shows what each agent has left before he picks one ───────────────
+# Claude: claude_usage(). Hermes: OpenRouter's key status (free_model_daily_requests; the key goes to openrouter.ai
+# only). Codex: the newest rate_limits in its session files. OpenCode Zen and agy keep their limits on their servers.
+LIMIT_PLANS = {"claude": "Claude Pro", "hermes": "OpenRouter free models", "opencode": "OpenCode Zen free tier",
+               "codex": "ChatGPT Plus", "agy": "Google Antigravity"}
+_limits_cache = {"at": 0.0, "data": {}}
+
+def _utc_midnight() -> float:
+    return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+def openrouter_free_window(payload: dict) -> Optional[dict]:
+    """OpenRouter GET /api/v1/key -> today's free-model window, or None when the answer doesn't carry it."""
+    f = (payload.get("data") or {}).get("free_model_daily_requests") or {}
+    if f.get("limit") is None:
+        return None
+    return {"name": "Free requests today", "used": int(f.get("used") or 0), "limit": int(f["limit"]), "resets_at": _utc_midnight() + 86400}
+
+def codex_windows(text: str, now: float) -> Optional[list]:
+    """The last rate_limits in a Codex session file -> windows; one past its reset has rolled over, so 0%."""
+    m = None
+    for m in re.finditer(r'"rate_limits":\s*', text):
+        pass
+    rl = json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
+    if not rl:
+        return None
+    out = []
+    for w in (rl.get("primary"), rl.get("secondary")):
+        if w and w.get("window_minutes"):
+            m = w["window_minutes"]
+            out.append({"name": "This week" if m == 10080 else f"{m // 60}-hour window", "resets_at": w.get("resets_at"),
+                        "used_pct": 0.0 if (w.get("resets_at") or now) < now else float(w.get("used_percent") or 0)})
+    return out
+
+def opencode_limit_hit(tail: str) -> Optional[float]:
+    """When OpenCode's log last said its free limit was reached."""
+    hits = re.findall(r"timestamp=(\S+) [^\n]*Free usage limit reached", tail)
+    return datetime.fromisoformat(hits[-1].replace("Z", "+00:00")).timestamp() if hits else None
+
+def calls_since(entries: list, agent: str, since: float) -> int:
+    return sum(1 for e in entries if e.get("agent") == agent and datetime.fromisoformat(e["timestamp"]).timestamp() >= since)
+
+def _read_external_limits() -> dict:
+    """The slow reads (network, big files); agent_limits caches them 5 min."""
+    now, data = time.time(), {}
+    try:  # Hermes
+        key = next((l.split("=", 1)[1].strip().strip("\"'") for l in HERMES_ENV.read_text(encoding="utf-8").splitlines()
+                    if l.startswith("OPENROUTER_API_KEY=")), "")
+        req = urllib.request.Request("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            w = openrouter_free_window(json.load(r))
+        if w:
+            data["hermes"] = {"windows": [w], "source": "api", "read_at": now}
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:  # Codex: newest session file that has a reading (day folders sessions/YYYY/MM/DD)
+        days = sorted((Path.home() / ".codex" / "sessions").glob("*/*/*"), reverse=True)[:3]
+        for f in sorted((f for d in days for f in d.glob("*.jsonl")), key=lambda f: f.stat().st_mtime, reverse=True):
+            if (w := codex_windows(f.read_text(encoding="utf-8", errors="replace"), now)) is not None:
+                data["codex"] = {"windows": w, "source": "api", "read_at": f.stat().st_mtime}
+                break
+    except (OSError, ValueError):
+        pass
+    try:  # OpenCode: the end of its log is enough
+        log = Path.home() / ".local" / "share" / "opencode" / "log" / "opencode.log"
+        with log.open("rb") as fh:
+            fh.seek(max(0, log.stat().st_size - 2_000_000))
+            hit = opencode_limit_hit(fh.read().decode("utf-8", "replace"))
+        if hit and hit > now - 86400:
+            data["opencode"] = {"limit_hit_at": hit}
+    except (OSError, ValueError):
+        pass
+    return data
+
+def agent_limits() -> dict:
+    if time.time() - _limits_cache["at"] >= 300:
+        _limits_cache.update(at=time.time(), data=_read_external_limits())
+    ext, now = _limits_cache["data"], time.time()
+    cost_file = BASE_DIR / "data" / "cost-history.json"
+    entries = json.loads(cost_file.read_text()).get("entries", []) if cost_file.exists() else []
+    local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    labels = {"claude": "Claude Code", "opencode": "OpenCode", "hermes": "Hermes", "agy": "agy", **{a["id"]: a["label"] for a in custom_agents()}}
+    out = {}
+    for a in AGENTS:
+        row = {"label": labels.get(a, a), "plan": LIMIT_PLANS.get(a, ""), "windows": [], "source": "not reported", "read_at": None,
+               "calls_today": calls_since(entries, a, local_midnight), "resting_until": _resting[a] if _resting.get(a, 0) > now else None}
+        if a == "claude" and (u := claude_usage()) is not None:
+            row.update(source="api", read_at=_usage_cache["at"],
+                       windows=[{"name": "5-hour window", "used_pct": u["five_hour"]}, {"name": "This week", "used_pct": u["seven_day"]}])
+        elif a == "hermes" and "hermes" not in ext:  # OpenRouter didn't answer: about 2 requests per Hermes run
+            row.update(source="estimate", windows=[{"name": "Free requests today", "used": 2 * calls_since(entries, a, _utc_midnight()),
+                                                    "limit": 50, "resets_at": _utc_midnight() + 86400}])
+        row.update(ext.get(a, {}))
+        out[a] = row
+    return out
+
+@app.get("/api/agent-limits")
+def agent_limits_state():
+    return agent_limits()
+
 # Workers are read-only (plan modes / safe toolsets): only Jharvis makes changes, with the owner's approval where needed.
 def execute_agent(agent: str, message: str, model: str = "", effort: str = "") -> str:
     """model / effort: this run's override; "" = the agent's default."""
-    out = _execute_agent(agent, message, model, effort)
-    # OpenCode Zen's free tier runs out; Claude (owner's subscription) picks the work up instead of failing the run.
-    if agent == "opencode" and out.startswith("opencode failed") and re.search(r"free.?(usage.?)?limit|429", out, re.I):
-        print("[agents] opencode free limit reached, using claude")
-        return _execute_agent("claude", message)
-    return out
+    if _resting.get(agent, 0) <= time.time():
+        out = _execute_agent(agent, message, model, effort)
+        if not _limited(agent, out):
+            return out
+    elif agent not in FREE_AGENTS:
+        return _execute_agent(agent, message, model, effort)
+    # this free agent is out: the other free ones, then the fallback pick (Claude only if chosen and under the guard)
+    for backup in dict.fromkeys([a for a in FREE_AGENTS if a != agent] + [bg_agent("fallback")]):
+        if backup != agent and _resting.get(backup, 0) <= time.time():
+            print(f"[agents] {agent} is resting, using {backup}")
+            out = _execute_agent(backup, message)
+            if not _limited(backup, out):
+                return out
+    return f"{ALL_LIMITED} until about {datetime.fromtimestamp(free_again_at()):%H:%M}. Try again then, or pick Claude."
 
 def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") -> str:
     message = AGENT_RULES + message
@@ -1760,6 +2132,10 @@ def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") 
                 code, out, err = run_cli(["hermes", *flags, "-z", fit_argv(message), "-t", "web,todo,memory,session_search"], timeout=420, cwd=AGENT_WORKDIR)
             except subprocess.TimeoutExpired:
                 return f"⏱ Hermes timed out.\n\nThe model took too long to respond. Try a shorter query or check your OpenRouter rate limits.\n\n**Message:** {message[:100]}"
+            # a provider limit comes back as a normal-looking reply ("...Your request was not processed") or exit 2 with the
+            # notice on stdout: make it a failure so execute_agent moves on to the next free agent
+            if "Your request was not processed" in (out or "") or (code != 0 and LIMIT_RE.search(out or "")):
+                return f"hermes failed: {(out or '').strip()[-400:]}"
             if code == 0:
                 append_cost("hermes", 0, 0.0, model or "hermes default")
                 cleaned = clean_hermes_output(out or "")
@@ -1770,7 +2146,7 @@ def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") 
             err_msg = (err or "").strip()
             if "invalid choice" in err_msg or "usage:" in err_msg:
                 return f"**Hermes needs setup**\n\nRun `hermes setup` or check your config.\n\n**Details:** {err_msg[:200]}"
-            return err_msg or f"hermes returned exit code {code}"
+            return f"hermes failed: {err_msg or f'exit code {code}'}"  # "failed" prefix: execute_agent spots free-limit errors
 
         elif agent == "agy":
             try:
@@ -1800,17 +2176,39 @@ def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") 
     except Exception as e:
         return f"⚠ Error communicating with {agent}: {str(e)}"
 
+# "Smart" in Chats (Jhon 29 Oct, Max -> Pro): picks the agent per message so Claude goes only to what needs it.
+SMART = "smart"
+_SMART_CODE = re.compile(r"```|\b(code|bug|error|traceback|exception|function|script|repo|refactor|python|typescript|"
+                         r"javascript|sql|regex|compile|stack ?trace)\b|\.(py|ts|tsx|js|json|ps1|sh)\b", re.I)
+_SMART_WEB = re.compile(r"\b(latest|news|today|price|search|look up|google|website|who is|what happened)\b|https?://", re.I)
+_SMART_HARD = re.compile(r"\b(plan|design|architect\w*|strategy|decide|decision|compare|trade-?offs?|analy[sz]e|review|"
+                         r"why|pros and cons|think (hard|deeply))\b", re.I)
+
+def smart_pick(message: str) -> tuple:
+    """(agent, why): code -> OpenCode, web -> Hermes, hard thinking or long -> Claude (only under the guard), else Hermes."""
+    if _SMART_CODE.search(message):
+        return "opencode", "code"
+    if _SMART_WEB.search(message):
+        return "hermes", "web / fresh facts"
+    if _SMART_HARD.search(message) or len(message) > 1200:
+        why = claude_guard()
+        return ("opencode", f"hard, but {why}") if why else ("claude", "hard thinking")
+    return "hermes", "everyday question"
+
 @app.post("/api/chat")
 def chat(req: ChatRequest):
     agent = req.agent.lower().strip()
-    if agent not in AGENTS:
+    if agent not in AGENTS and agent != SMART:
         raise HTTPException(400, f"Agent must be one of: {', '.join(AGENTS)}")
     message = (req.message or "").strip()
     if not message:
         raise HTTPException(400, "Message cannot be empty")
     if len(message) > 10000:
         raise HTTPException(400, "Message too long (max 10000 characters)")
-    model, effort = check_pick(agent, req.model, req.effort)
+    model, effort = check_pick(agent, req.model, req.effort) if agent != SMART else ("", "")
+    if message in ("/clear", "/new"):  # same as the live agents: start a new chat, never send it to the CLI
+        clear_chat(agent)
+        return {"status": "cleared"}
 
     user_msg = {
         "id": str(uuid.uuid4())[:8],
@@ -1822,15 +2220,25 @@ def chat(req: ChatRequest):
     # Each CLI call starts fresh, so give the agent the recent turns of this chat.
     recent = [m for m in load_chat_history().get("messages", []) if m.get("agent") == agent][-10:]
     save_chat_message(user_msg)
-    context = "\n\n".join(f"[{owner.NAME if m['role'] == 'user' else agent}]\n{m['content']}" for m in recent)
+    context = "\n\n".join(f"[{owner.NAME if m['role'] == 'user' else m.get('by', agent)}]\n{m['content']}" for m in recent)
     prompt = f"Earlier in this chat:\n{context}\n\n{owner.NAME} now says:\n{message}" if context else message
+    run_as, why = smart_pick(message) if agent == SMART else (agent, "")
 
     # "/skill-name details" runs that skill with this agent (like slash commands)
     slash = re.fullmatch(r"/([a-zA-Z0-9_-]+)\s*(.*)", message, re.S)
     if slash and (BASE_DIR / "skills" / slash[1] / "SKILL.md").exists():
-        response_text = run_skill(slash[1], SkillRunRequest(input=slash[2], agent=agent))["output"]
+        response_text = run_skill(slash[1], SkillRunRequest(input=slash[2], agent=run_as))["output"]
     else:
-        response_text = execute_agent(agent, prompt, model, effort)
+        response_text = execute_agent(run_as, prompt, model, effort)
+        # Smart always answers (Jhon, 29 Oct): free agents all out -> Codex (his ChatGPT plan), then Claude under the guard
+        if agent == SMART and response_text.startswith(ALL_LIMITED):
+            for backup in [a for a in ("codex", "claude") if a in AGENTS]:
+                if backup == "claude" and claude_guard():
+                    continue
+                out = execute_agent(backup, prompt)
+                if not re.match(r"^\S+ failed:|^⚠|^⏱", out):
+                    response_text, run_as, why = out, backup, f"{why}; free agents were out"
+                    break
 
     agent_msg = {
         "id": str(uuid.uuid4())[:8],
@@ -1838,10 +2246,11 @@ def chat(req: ChatRequest):
         "agent": agent,
         "content": response_text,
         "timestamp": get_timestamp(),
+        **({"by": run_as, "why": why} if agent == SMART else {}),
     }
     save_chat_message(agent_msg)
 
-    append_audit({"action": "chat_message", "agent": agent, "msg_preview": message[:50]})
+    append_audit({"action": "chat_message", "agent": run_as, "msg_preview": message[:50]})
 
     return {"status": "ok", "response": agent_msg}
 
@@ -1920,7 +2329,9 @@ def hermes_stream(message: str, model: str = "", effort: str = ""):
 CLAUDE_SESSION_FILE = BASE_DIR / "data" / "claude-chat-session"  # Claude Code session id; delete it to start a fresh chat
 CLAUDE_COMMANDS_FILE = BASE_DIR / "data" / "claude-commands.json"  # its slash commands, as listed when a chat starts
 CHAT_CONTEXT_FILE = BASE_DIR / "data" / "chat-context.json"  # {agent: {used, window}} for the Chats page's context bar
-CHAT_SESSION_FILES = {"hermes": HERMES_SESSION_FILE, "claude": CLAUDE_SESSION_FILE}
+def chat_session_file(agent: str) -> Optional[Path]:
+    """The file holding a live agent's CLI session id; looked up at call time so tests' moved paths apply."""
+    return {"hermes": HERMES_SESSION_FILE, "claude": CLAUDE_SESSION_FILE}.get(agent)
 _chat_context_lock = threading.Lock()
 
 def chat_context(agent: str, value: Optional[dict] = None) -> Optional[dict]:
@@ -2019,9 +2430,7 @@ def chat_stream(req: ChatRequest):
         raise HTTPException(400, "Message must be 1-10000 characters")
     model, effort = agent_pick(agent, *check_pick(agent, req.model, req.effort))
     label = {"hermes": "Hermes", "claude": "Claude Code"}[agent]
-    if message in ("/clear", "/new"):  # a fresh chat: the agent forgets, the thread here stays
-        CHAT_SESSION_FILES[agent].unlink(missing_ok=True)
-        chat_context(agent, {})
+    if message in ("/clear", "/new"):  # a fresh chat: the agent forgets, the old one stays in the chat list
         clear_chat(agent)
         frames = [{"type": "context", "used": 0, "window": None}, {"type": "cleared"}]
         return StreamingResponse(iter(f"data: {json.dumps(f)}\n\n" for f in frames), media_type="text/event-stream")
@@ -2237,6 +2646,8 @@ def session_verdict(messages: list) -> str:
               f"what is best for him. Don't summarise each agent. Start with the answer itself, ready to use. Then a "
               f"line 'Why:' with one or two sentences. If they disagreed on something that matters, end with one line "
               f"'They disagreed on:'. Plain, short English.\n\nDebate:\n{debate}")
+    if (agent := bg_agent("verdict")) != "claude":
+        return execute_agent(agent, prompt).strip() or "Jharvis couldn't decide this time. Open the debate below."
     try:
         code, out, err = run_cli(["claude", "-p", "--output-format", "json", "--model", "opus", "--effort", "high", "--tools", ""],
                                  timeout=900, cwd=AGENT_WORKDIR, answer=prompt)  # prompt on stdin: the debate can be long
@@ -2701,6 +3112,8 @@ def _ticket_prompt(t: dict, stage: str) -> str:
                    "is exactly STATUS: RESOLVED or STATUS: NEEDS JHON (with why).")
 
 def _run_ticket_claude(t: dict, stage: str) -> str:
+    if stage == "plan" and (agent := bg_agent("ticket_plan")) != "claude":  # planning is background; the approved fix stays Claude
+        return execute_agent(agent, _ticket_prompt(t, stage))
     model = agent_model("claude", "sonnet")
     args = ["claude", "-p", "--output-format", "json", "--model", model, "--add-dir", READ_ROOT]  # prompt on stdin
     if stage == "plan":
@@ -2755,7 +3168,11 @@ def ticket_tick():
 
         def done(x):
             moved = x["status"] != t["status"]  # closed, parked or undone during the run: that status stands
-            if stage == "plan":
+            if stage == "plan" and ok and out.startswith(ALL_LIMITED):  # free agents out: picked up again after the reset
+                if not moved:
+                    x["status"], x["pickup_by"] = "new", datetime.fromtimestamp(free_again_at(), timezone.utc).isoformat()
+                _ticket_log(x, "Claude", f"Free agents are at their limit; I'll pick it up again after {datetime.fromtimestamp(free_again_at()):%H:%M}")
+            elif stage == "plan":
                 x["plan"] = out if ok else x.get("plan", "")
                 if not moved:
                     x["status"] = "awaiting_approval" if ok else "waiting_on_you"
@@ -2833,28 +3250,44 @@ def self_review() -> dict:
         "it scores better); never propose editing skill files by hand. Severity: P2 broken now, P3 annoying, P4 small. "
         "project = the folder the fix belongs in (empty = the OS). Plain English, short.")
     model = agent_model("claude", "sonnet")
+    agent = bg_agent("self_review")
     opened, problem, out, err = [], None, "", ""
     try:
-        code, out, err = run_cli(["claude", "-p", "--output-format", "json", "--model", model, "--add-dir", READ_ROOT,
-                                  "--permission-mode", "plan", "--json-schema", json.dumps(REVIEW_SCHEMA)],
-                                 timeout=1200, cwd=BASE_DIR, answer=prompt)
-        result = json.loads(out)
-        if result.get("is_error"):
-            raise RuntimeError(result.get("result"))
-        append_cost("claude", sum(result.get("usage", {}).get(k, 0) for k in ("input_tokens", "output_tokens",
-                    "cache_creation_input_tokens", "cache_read_input_tokens")), result.get("total_cost_usd", 0.0), model)
-        for f in (result.get("structured_output") or {}).get("findings", [])[:3]:
+        if agent != "claude":  # free agents can't open files: the recent logs go in the prompt
+            tail = lambda p, n: "\n".join(p.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]) if p.exists() else "(none)"
+            out = execute_agent(agent, prompt + "\n\nThe files, newest lines:\n--- audit.log ---\n" + tail(BASE_DIR / "audit" / "audit.log", 150)
+                                + "\n--- server.log ---\n" + tail(BASE_DIR / "data" / "server.log", 80) + "\n--- tickets ---\n"
+                                + json.dumps([{k: t.get(k) for k in ("title", "status", "result")} for t in _tickets()][-30:])[:6000]
+                                + "\n\nAnswer with only JSON matching this schema: " + json.dumps(REVIEW_SCHEMA))
+            findings = (pipeline.first_json(out, "{") or {}).get("findings")
+            if not isinstance(findings, list):
+                raise RuntimeError(f"{agent} gave no findings JSON")
+        else:
+            code, out, err = run_cli(["claude", "-p", "--output-format", "json", "--model", model, "--add-dir", READ_ROOT,
+                                      "--permission-mode", "plan", "--json-schema", json.dumps(REVIEW_SCHEMA)],
+                                     timeout=1200, cwd=BASE_DIR, answer=prompt)
+            result = json.loads(out)
+            if result.get("is_error"):
+                raise RuntimeError(result.get("result"))
+            append_cost("claude", sum(result.get("usage", {}).get(k, 0) for k in ("input_tokens", "output_tokens",
+                        "cache_creation_input_tokens", "cache_read_input_tokens")), result.get("total_cost_usd", 0.0), model)
+            findings = (result.get("structured_output") or {}).get("findings", [])
+        for f in [f for f in findings if isinstance(f, dict) and f.get("title") and f.get("severity") in ("P2", "P3", "P4")
+                  and f.get("category") in TICKET_CATEGORIES][:3]:
             project = f.get("project", "").strip()
-            t = create_ticket(TicketCreate(title=f["title"][:160], description=f["description"][:20000], category=f["category"],
+            t = create_ticket(TicketCreate(title=f["title"][:160], description=str(f.get("description", ""))[:20000], category=f["category"],
                                            severity=f["severity"], project=project if project and Path(project).is_dir() else ""))
             _update_ticket(t["id"], _by_review)
             opened.append(t["id"])
     except Exception as e:  # noqa: BLE001 - recorded, tried again tomorrow
-        tail = (err or out or "").strip()[-250:]
-        problem = (f"{e}: {tail}" if tail else str(e) or type(e).__name__)[:400]
-    state = {"last": get_timestamp(), "running": False, "opened": opened, "problem": problem}
+        said = (err or out or "").strip()[-250:]
+        problem = (f"{e}: {said}" if said else str(e) or type(e).__name__)[:400]
+    last = get_timestamp()
+    if problem and ALL_LIMITED in problem:  # free agents out: due again when they reset, not in 24 h
+        last = datetime.fromtimestamp(free_again_at() - 24 * 3600, timezone.utc).isoformat()
+    state = {"last": last, "running": False, "opened": opened, "problem": problem}
     write_atomic(REVIEW_FILE, json.dumps(state))
-    append_audit({"action": "self_review", "agent": "claude", "msg_preview": f"{len(opened)} ticket(s)" if not problem else problem[:60]})
+    append_audit({"action": "self_review", "agent": agent, "msg_preview": f"{len(opened)} ticket(s)" if not problem else problem[:60]})
     return state
 
 @app.get("/api/self-review")
@@ -3470,6 +3903,7 @@ class TeamRequest(BaseModel):
     message: str
     agent: str = "claude"
     max_hops: int = 5
+    background: bool = False  # a scheduled run: its Claude turns go through the Claude guard
 
 def team_prompt(agent: str, task: str, steps: list) -> str:
     roster = "\n".join(f"- {a}: {r}" for a, r in TEAM_ROLES.items() if a != agent)
@@ -3492,7 +3926,8 @@ def run_team(thread: dict, max_hops: int):
     for _ in range(max_hops):
         thread["active"] = agent
         save_thread(thread)
-        output = execute_agent(agent, team_prompt(agent, task, thread["steps"]))
+        run_as = BACKGROUND_DEFAULT if thread.get("background") and agent == "claude" and claude_guard() else agent
+        output = execute_agent(run_as, team_prompt(agent, task, thread["steps"]))
         handoff = HANDOFF_RE.findall(output)
         nxt = handoff[-1] if handoff else None
         thread["steps"].append({"agent": agent, "task": task, "output": HANDOFF_RE.sub("", output).strip(),
@@ -3515,7 +3950,7 @@ def start_team(req: TeamRequest):
     if not message or len(message) > 10000:
         raise HTTPException(400, "Message must be 1-10000 characters")
     thread = {"id": str(uuid.uuid4())[:8], "message": message, "start_agent": agent,
-              "status": "running", "active": agent, "steps": [], "created": get_timestamp()}
+              "status": "running", "active": agent, "steps": [], "created": get_timestamp(), "background": req.background}
     save_thread(thread)
     threading.Thread(target=run_team, args=(thread, max(1, min(req.max_hops, 5))), daemon=True).start()
     return thread
@@ -3534,6 +3969,41 @@ def get_team(thread_id: str):
     if not f.exists():
         raise HTTPException(404, "Thread not found")
     return json.loads(f.read_text())
+
+class ChatOpenRequest(BaseModel):
+    agent: str
+    chat: str
+
+class ChatRenameRequest(ChatOpenRequest):
+    name: str = ""
+
+@app.get("/api/chat/list")
+def get_chat_list(agent: str, q: str = Query("", max_length=200)):
+    return {"chats": list_chats(agent.lower().strip(), q)}
+
+@app.post("/api/chat/open")
+def post_chat_open(req: ChatOpenRequest):
+    agent = req.agent.lower().strip()
+    validate_identifier(req.chat, r"^[\w-]{1,64}$", "chat id")
+    open_chat(agent, req.chat)
+    append_audit({"action": "chat_open", "agent": agent, "chat": req.chat})
+    return {"status": "ok"}
+
+@app.post("/api/chat/rename")
+def post_chat_rename(req: ChatRenameRequest):
+    agent = req.agent.lower().strip()
+    validate_identifier(req.chat, r"^[\w-]{1,64}$", "chat id")
+    rename_chat(agent, req.chat, req.name)
+    append_audit({"action": "chat_rename", "agent": agent, "chat": req.chat})
+    return {"status": "ok"}
+
+@app.post("/api/chat/delete")
+def post_chat_delete(req: ChatOpenRequest):
+    agent = req.agent.lower().strip()
+    validate_identifier(req.chat, r"^[\w-]{1,64}$", "chat id")
+    delete_chat(agent, req.chat)
+    append_audit({"action": "chat_delete", "agent": agent, "chat": req.chat})
+    return {"status": "ok"}
 
 @app.get("/api/chat/history")
 def get_chat_history(q: str = Query(""), agent: str = Query(""), limit: int = Query(200, le=1000)):
@@ -4238,6 +4708,101 @@ def get_diff(file: str = Query(""), ref: str = Query("HEAD")):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+# ─── Routes: Approvals (one queue for everything agents want Jhon's yes on; Jhon 29 Oct) ──────────
+# No store of its own: it reads each source's pending items and answers through that source's own approve/deny
+# code. Sources: ticket plans, job drafts (every person's board), Jharvis asks from dashboard chats (the OS store
+# above), Jharvis asks from Slack/voice (live in his control UI on 127.0.0.1:3901), skill-lab scanner blocks.
+JHARVIS_UI = os.environ.get("JHARVIS_UI_URL", "http://127.0.0.1:3901")
+JHARVIS_UI_TOKEN = Path(os.environ.get("JHARVIS_UI_TOKEN", "C:/Users/Admin-PC/Documents/Jharvis/data/ui_token.txt"))
+
+class ApprovalDecision(BaseModel):
+    decision: str   # approve | deny
+    note: str = ""  # tickets: why not, so Claude plans again with it
+
+def jharvis_ui(method: str, path: str, body: Optional[dict] = None) -> dict:
+    """Jharvis's own control UI API (same calls as its page); raises OSError when he is off."""
+    req = urllib.request.Request(JHARVIS_UI + path, json.dumps(body).encode() if body is not None else None, method=method,
+                                 headers={"Content-Type": "application/json", "X-Jharvis-UI": "1",
+                                          "X-Jharvis-Token": JHARVIS_UI_TOKEN.read_text().strip()})
+    with urllib.request.urlopen(req, timeout=2) as r:
+        return json.loads(r.read())
+
+def _lab_overridable(r: dict) -> bool:
+    """Same test as skill_lab_install_anyway: only a scanner block can be overruled."""
+    return r["status"] == "blocked" and not r.get("dismissed") and (
+        r.get("blocked_by") == "scanner" or r["messages"][-1]["text"].startswith("**Blocked by the scanner**"))
+
+def approval_items() -> list:
+    items = []
+    for t in _tickets():
+        if t["status"] == "awaiting_approval":
+            items.append({"id": f"ticket:{t['id']}", "kind": "ticket", "title": f"{t['id']} {t['title']}", "detail": t.get("plan", ""),
+                          "agent": t.get("assignee", "Claude"), "created": t.get("updated") or t["created"], "link": "#/tickets"})
+    for who, path in [("", pipeline.BOARD)] + [(pid, people.board(pid)) for pid in people.PEOPLE]:
+        for j in pipeline.load(path, {"jobs": []})["jobs"]:
+            if j["status"] == "drafted":
+                items.append({"id": f"job:{who}:{j['id']}", "kind": "job", "title": f"Apply: {j['title']} at {j['company']}"
+                              + (f" (for {people.PEOPLE[who]['name']})" if who else ""), "detail": j.get("draft", ""),
+                              "agent": "Job search", "created": j.get("found", ""), "link": "#/jobs", "url": j.get("url")})
+    for a in _approvals():
+        if a["status"] == "pending":
+            items.append({"id": f"jharvis:{a['id']}", "kind": "jharvis", "title": f"Jharvis wants to run {a['tool']}",
+                          "detail": json.dumps(a["args"], indent=2, ensure_ascii=False), "agent": "Jharvis", "created": a["asked"], "link": "#/home"})
+    try:
+        for a in jharvis_ui("GET", "/api/state")["approvals"]:  # args and reason come back redacted
+            items.append({"id": f"jharvis-live:{a['id']}", "kind": "jharvis", "title": f"Jharvis wants to run {a['tool']}",
+                          "detail": "\n\n".join(x for x in (a.get("reason", ""), json.dumps(a["args"], indent=2, ensure_ascii=False)) if x),
+                          "agent": "Jharvis (Slack / voice)", "created": datetime.fromtimestamp(a["created"], timezone.utc).isoformat(),
+                          "expires": datetime.fromtimestamp(a["expires_at"], timezone.utc).isoformat(), "link": "#/home"})
+    except (OSError, ValueError, KeyError):  # Jharvis is off: his Slack/voice asks just aren't listed
+        pass
+    for r in _lab_runs():
+        if _lab_overridable(r):
+            items.append({"id": f"skill:{r['id']}", "kind": "skill", "title": f"Install {r['name'] or 'the skill'} anyway?",
+                          "detail": r["messages"][-1]["text"], "agent": "Skill lab", "created": r["created"], "link": "#/skills"})
+    return sorted(items, key=lambda i: i["created"] or "", reverse=True)
+
+@app.get("/api/approvals")
+def approvals_list():
+    items = approval_items()
+    return {"approvals": items, "count": len(items)}
+
+@app.post("/api/approvals/{aid}")
+def approval_decide(aid: str, d: ApprovalDecision, request: Request):
+    """Approve / Deny one item through its source's own code path."""
+    if d.decision not in ("approve", "deny"):
+        raise HTTPException(400, "decision must be approve or deny")
+    yes = d.decision == "approve"
+    kind, _, ref = aid.partition(":")
+    if kind == "ticket":
+        return approve_ticket(ref) if yes else reject_ticket(ref, TicketComment(text=d.note))
+    if kind == "job":
+        who, _, jid = ref.partition(":")
+        return jobs_decision(jid, {"decision": "approve" if yes else "skip"}, who)
+    if kind == "jharvis":
+        return jharvis_approval_decide(ref, JharvisApprovalDecision(approve=yes))
+    if kind == "jharvis-live":
+        validate_identifier(ref, r"^[0-9a-f]{32}$", "request id")
+        try:
+            return jharvis_ui("POST", f"/api/approvals/{ref}", {"approved": yes})
+        except urllib.error.HTTPError as e:  # 404 gone / 409 already answered or timed out
+            raise HTTPException(409, f"Jharvis no longer waits on this one ({e.code})")
+        except OSError:
+            raise HTTPException(503, "Jharvis isn't running")
+    if kind == "skill":
+        if yes:
+            return skill_lab_install_anyway(ref, request)
+        if not is_loopback(request):
+            raise HTTPException(403, "Only on the PC itself")
+        validate_identifier(ref, r"^[0-9a-f]{8}$", "run id")
+        with _lab_lock:
+            if not any(r["id"] == ref for r in _lab_runs()):
+                raise HTTPException(404, "No such run")
+            _lab_update(ref, lambda r: r.update(dismissed=True))  # stays blocked; just off the queue
+        append_audit({"action": "skill_install_denied", "agent": "claude", "skill": ref})
+        return {"dismissed": True}
+    raise HTTPException(404, "Unknown approval")
+
 # ─── Routes: Dashboard Static Files ──────────────────────────────
 
 dashboard_dir = BASE_DIR / "dashboard"
@@ -4249,6 +4814,8 @@ if (WEB_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=str(WEB_DIST / "assets")), name="web-assets")
 if (WEB_DIST / "agents").exists():
     app.mount("/agents", StaticFiles(directory=str(WEB_DIST / "agents")), name="web-agent-logos")
+if (WEB_DIST / "icons").exists():  # PWA icons (web/public/icons)
+    app.mount("/icons", StaticFiles(directory=str(WEB_DIST / "icons")), name="web-icons")
 
 @app.get("/", response_class=HTMLResponse)
 def web_index():
@@ -4288,7 +4855,7 @@ for _asset in ("styles.css", "utils.js", "api.js", "app.js"):
 
 # ─── Favicon ──────────────────────────────────────────────────────
 
-FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><defs><linearGradient id="chrome" gradientUnits="userSpaceOnUse" x1="28" y1="28" x2="228" y2="228"><stop offset="0" stop-color="#5B6F86"/><stop offset=".55" stop-color="#1F2D44"/><stop offset="1" stop-color="#0E1726"/></linearGradient><linearGradient id="ice" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="256" y2="256"><stop offset="0" stop-color="#B9ECFF"/><stop offset="1" stop-color="#3FB6EC"/></linearGradient></defs><path d="M188.8 73.5A82 82 0 1 1 155 50.6" fill="none" stroke="url(#chrome)" stroke-width="18" stroke-linecap="round"/><circle cx="210" cy="128" r="12" fill="url(#chrome)"/><circle cx="128" cy="210" r="16" fill="url(#chrome)"/><circle cx="46" cy="128" r="20" fill="url(#chrome)"/><circle cx="198" cy="58" r="22" fill="url(#ice)"/></svg>'  # Orbit logo
+FAVICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"><defs><linearGradient id="chrome" gradientUnits="userSpaceOnUse" x1="28" y1="28" x2="228" y2="228"><stop offset="0" stop-color="#5B6F86"/><stop offset=".55" stop-color="#1F2D44"/><stop offset="1" stop-color="#0E1726"/></linearGradient><linearGradient id="ice" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="256" y2="256"><stop offset="0" stop-color="#B9ECFF"/><stop offset="1" stop-color="#3FB6EC"/></linearGradient></defs><path d="M145.49 40.3L231.32 188.96C236.84 198.52 233.57 210.75 224 216.28C214.43 221.8 202.2 218.52 196.68 208.96L128 90L59.32 208.96C53.8 218.52 41.57 221.8 32 216.28C22.43 210.75 19.16 198.52 24.68 188.96L110.51 40.3C111.4 38.69 112.52 37.19 113.85 35.86C115.59 34.12 117.6 32.74 119.78 31.76C122.43 30.57 125.23 29.99 128 30C130.77 29.99 133.57 30.57 136.22 31.77C138.4 32.75 140.41 34.12 142.14 35.85C143.48 37.19 144.6 38.69 145.49 40.3Z" fill="url(#chrome)"/><path d="M150 154C150 166.15 140.15 176 128 176C115.85 176 106 166.15 106 154C106 141.85 115.85 132 128 132C140.15 132 150 141.85 150 154Z" fill="url(#ice)"/></svg>'  # "A" logo, built with geo-logo (design/logo-a/spec.json), 29 Oct
 
 @app.get("/favicon.ico")
 def favicon():
@@ -4305,15 +4872,27 @@ def favicon_svg():
 # ─── PWA Support (v3.0) ──────────────────────────────────────────
 
 MANIFEST_JSON = {
+    "id": "/",
     "name": "Agentic OS",
-    "short_name": "AgenticOS",
-    "description": "Multi-agent orchestration platform",
+    "short_name": "Agentic OS",
+    "description": "Talk to Jharvis, answer approvals, watch your agents",
     "start_url": "/",
+    "scope": "/",
     "display": "standalone",
+    "orientation": "portrait",
     "background_color": "#E6EEF4",
     "theme_color": "#E6EEF4",
     "icons": [
-        {"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"},
+        {"src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+        {"src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+        {"src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+        {"src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+    ],
+    # long-press on the home-screen icon
+    "shortcuts": [
+        {"name": "Talk to Jharvis", "short_name": "Talk", "url": "/#/home", "icons": [{"src": "/icons/icon-96.png", "sizes": "96x96"}]},
+        {"name": "Approvals", "url": "/#/approvals", "icons": [{"src": "/icons/icon-96.png", "sizes": "96x96"}]},
+        {"name": "New chat", "url": "/#/chats", "icons": [{"src": "/icons/icon-96.png", "sizes": "96x96"}]},
     ],
 }
 
@@ -4321,6 +4900,7 @@ MANIFEST_JSON = {
 def manifest():
     return JSONResponse(content=MANIFEST_JSON)
 
+# Exists so Android offers "Install". Nothing is cached; /api is left to the browser (network only, streams untouched).
 SERVICE_WORKER_JS = """
 self.addEventListener('install', (e) => {
   self.skipWaiting();
@@ -4329,6 +4909,8 @@ self.addEventListener('activate', (e) => {
   e.waitUntil(clients.claim());
 });
 self.addEventListener('fetch', (e) => {
+  // page loads and /api fail normally, so the Android app shows its own "Can't reach your PC" + Retry screen
+  if (e.request.mode === 'navigate' || new URL(e.request.url).pathname.startsWith('/api/')) return;
   e.respondWith(fetch(e.request).catch(() => new Response('Offline', {status: 503})));
 });
 """
@@ -4336,6 +4918,65 @@ self.addEventListener('fetch', (e) => {
 @app.get("/sw.js")
 def service_worker():
     return Response(content=SERVICE_WORKER_JS, media_type="application/javascript")
+
+# ─── Phone pairing ───────────────────────────────────────────────
+# The PC shows a QR of https://<pc>.ts.net:8810/#pair=<token>. The fragment never reaches a server or a log; the phone's
+# page posts it here once for the same aos_token cookie the ?token= link sets, then strips it from the address bar.
+
+class PairRequest(BaseModel):
+    token: str = ""
+    code: str = ""  # or the 6 digits the PC shows (for the Android app, which has no camera route to #pair)
+
+# One code at a time: made on the PC's screen, 5 minutes, single use, void after 5 wrong tries. Never logged.
+PAIR_CODE_TTL, PAIR_CODE_TRIES = 300, 5
+_pair_code: dict = {}
+_pair_code_lock = threading.Lock()
+
+def use_pair_code(given: str) -> bool:
+    with _pair_code_lock:
+        if not given or not _pair_code:
+            return False
+        if time.time() > _pair_code["expires"]:
+            _pair_code.clear()
+            return False
+        if secrets_compare(given, _pair_code["code"]):
+            _pair_code.clear()
+            return True
+        _pair_code["tries"] += 1
+        if _pair_code["tries"] >= PAIR_CODE_TRIES:
+            _pair_code.clear()
+        return False
+
+@app.get("/api/pair/code")
+def pair_code(request: Request):
+    if not is_loopback(request):  # a code is as good as the token for 5 minutes: only on the PC's own screen
+        raise HTTPException(403, "Only on the PC itself")
+    import secrets
+    with _pair_code_lock:
+        _pair_code.update(code=f"{secrets.randbelow(10**6):06d}", expires=time.time() + PAIR_CODE_TTL, tries=0)
+        return {"code": _pair_code["code"], "expires_in": PAIR_CODE_TTL}
+
+@app.post("/api/pair")
+def pair_phone(p: PairRequest, request: Request, response: Response):
+    if not (secrets_compare(p.token, AUTH_TOKEN) or use_pair_code(p.code.strip())):
+        raise HTTPException(401, "Wrong or expired pairing code")
+    https = (request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+             or request.headers.get("host", "").split(":")[0].lower().endswith(".ts.net"))  # Serve is https-only
+    response.set_cookie("aos_token", AUTH_TOKEN, httponly=True, samesite="strict", secure=https, max_age=60 * 60 * 24 * 365)
+    return {"paired": True}
+
+@app.get("/api/pair/link")
+def pair_link(request: Request):
+    if not is_loopback(request):  # the token itself: only on the PC's own screen
+        raise HTTPException(403, "Only on the PC itself")
+    try:
+        out = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        name = json.loads(out)["Self"]["DNSName"].rstrip(".")
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        raise HTTPException(503, "Tailscale isn't running on this PC")
+    # 8810 = the Tailscale Serve port set up for the phone (tailscale serve --https=8810)
+    return {"url": f"https://{name}:8810/#pair={AUTH_TOKEN}"}
 
 # ─── Main ─────────────────────────────────────────────────────────
 

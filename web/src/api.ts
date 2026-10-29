@@ -7,7 +7,9 @@ export type TeamStep = { agent: AgentName; task: string; output: string; handoff
 export type Thread = { id: string; message: string; start_agent: AgentName; status: 'running' | 'done'; active: AgentName | null; steps: TeamStep[]; created: string }
 
 export type ChatMsg = { id: string; role: 'user' | 'assistant'; agent: AgentName; content: string; timestamp: string }
-export type ToolStep = { tool: string; toolCallId: string; label?: string; emoji?: string; status: 'running' | 'completed' | string }
+/** One chat in an agent's chat list; current = the open one. */
+export type ChatItem = { id: string; title: string; updated: string; count: number; current: boolean; snippet?: string }
+export type ToolStep ={ tool: string; toolCallId: string; label?: string; emoji?: string; status: 'running' | 'completed' | string }
 export type ChatContext = { used: number; window: number | null }
 export type StreamEvent = ({ type: 'context' } & ChatContext) | { type: 'text'; text: string } | ({ type: 'tool' } & ToolStep) | { type: 'error'; error: string } | { type: 'cleared' } | { type: 'done'; message: ChatMsg }
 export type SessionMsg = { role: 'user' | 'agent' | 'verdict'; agent: AgentName | null; round: number; content: string; timestamp: string; prompt_tokens?: number }
@@ -28,6 +30,14 @@ export type TicketSeverity = 'P1' | 'P2' | 'P3' | 'P4'
 export type TicketCategory = 'incident' | 'bug' | 'request' | 'change'
 export type TicketStatus = 'new' | 'planning' | 'awaiting_approval' | 'approved' | 'in_progress' | 'waiting_on_you' | 'resolved' | 'closed'
 export type Ticket = { id: string; title: string; description: string; category: TicketCategory; severity: TicketSeverity; status: TicketStatus; project: string; reporter: string; assignee: string; created: string; updated: string; pickup_by: string; due: string; plan: string; result: string; files?: string[]; log: { at: string; who: string; text: string }[] }
+export type GuardUsage = { five_hour: number; seven_day: number }
+/** picked = the setting; now = what runs right now (Claude falls back to the free default while the guard blocks). */
+export type ClaudeGuard = { usage: GuardUsage | null; blocked: string | null; default: AgentName; limits: GuardUsage; jobs: Record<string, { picked: AgentName; now: AgentName }> }
+/** One limit window: used_pct (Claude, Codex) or used of limit requests (Hermes). Times are epoch seconds. */
+export type LimitWindow = { name: string; used_pct?: number; used?: number; limit?: number; resets_at?: number }
+export type AgentLimit = { label: string; plan: string; windows: LimitWindow[]; source: 'api' | 'estimate' | 'not reported'; read_at: number | null; calls_today: number; resting_until: number | null; limit_hit_at?: number }
+/** One thing an agent wants Jhon's yes on (GET /api/approvals); id = kind:ref, decided through the source's own path. */
+export type Approval = { id: string; kind: 'ticket' | 'job' | 'jharvis' | 'skill'; title: string; detail: string; agent: string; created: string; link: string; url?: string; expires?: string }
 export type JobRun = { started: string; finished?: string; fetched: number; new: number; kept: number; scored: number; drafted: number; needs_you: number; errors: string[] }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -48,6 +58,10 @@ export const api = {
     req<{ output: string; agent: string }>(`/api/skills/${encodeURIComponent(name)}/run`, { method: 'POST', body: JSON.stringify({ input, agent }) }),
   chatHistory: (agent: AgentName) => req<{ messages: ChatMsg[] }>(`/api/chat/history?agent=${agent}&limit=100`),
   chat: (agent: AgentName, message: string, pick: ModelChoice = {}) => req<{ response: ChatMsg }>('/api/chat', { method: 'POST', body: JSON.stringify({ agent, message, ...pick }) }),
+  chatList: (agent: AgentName, q = '') => req<{ chats: ChatItem[] }>(`/api/chat/list?agent=${agent}&q=${encodeURIComponent(q)}`),
+  chatOpen: (agent: AgentName, chat: string) => req<{ status: string }>('/api/chat/open', { method: 'POST', body: JSON.stringify({ agent, chat }) }),
+  chatRename: (agent: AgentName, chat: string, name: string) => req<{ status: string }>('/api/chat/rename', { method: 'POST', body: JSON.stringify({ agent, chat, name }) }),
+  chatDelete: (agent: AgentName, chat: string) => req<{ status: string }>('/api/chat/delete', { method: 'POST', body: JSON.stringify({ agent, chat }) }),
   chatMeta: (agent: AgentName) => req<{ context: ChatContext | null; commands: string[]; live: boolean }>(`/api/chat/meta?agent=${agent}`),
   // Live reply: words and tool steps arrive as server-sent events (Hermes and Claude Code)
   chatStream: async (agent: AgentName, message: string, on: (e: StreamEvent) => void, pick: ModelChoice = {}) => {
@@ -90,6 +104,11 @@ export const api = {
   settings: () => req<{ models?: Record<string, string>; efforts?: Record<string, string> }>('/api/settings'),
   saveModels: (models: Record<string, string>, efforts: Record<string, string>) =>
     req<unknown>('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { models, efforts } }) }),
+  claudeGuard: () => req<ClaudeGuard>('/api/claude-guard'),
+  agentLimits: () => req<Record<AgentName, AgentLimit>>('/api/agent-limits'),
+  // background replaces the whole old map, so send every job
+  saveGuard: (settings: { background?: Record<string, AgentName>; claude_guard?: GuardUsage }) =>
+    req<unknown>('/api/settings', { method: 'PUT', body: JSON.stringify({ settings }) }),
   jobPeople: () => req<{ id: string; name: string; summary?: string }[]>('/api/jobs/people'),
   jobsBoard: (who = '') => req<{ jobs: JobPost[]; runs: JobRun[]; running: boolean }>(`/api/jobs?who=${who}`),
   runJobSearch: (who = '') => req<unknown>(`/api/jobs/run?who=${who}`, { method: 'POST' }),
@@ -131,6 +150,9 @@ export const api = {
   runSelfReview: () => req<unknown>('/api/self-review/run', { method: 'POST' }),
   approveTicket: (id: string) => req<Ticket>(`/api/tickets/${id}/approve`, { method: 'POST' }),
   rejectTicket: (id: string, text: string) => req<Ticket>(`/api/tickets/${id}/reject`, { method: 'POST', body: JSON.stringify({ text }) }),
+  approvals: () => req<{ approvals: Approval[]; count: number }>('/api/approvals'),
+  decideApproval: (id: string, decision: 'approve' | 'deny', note = '') =>
+    req<unknown>(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ decision, note }) }),
   threads: () => req<{ threads: Thread[] }>('/api/team'),
   thread: (id: string) => req<Thread>(`/api/team/${id}`),
   startTeam: (message: string, agent: AgentName) => req<Thread>('/api/team', { method: 'POST', body: JSON.stringify({ message, agent }) }),
