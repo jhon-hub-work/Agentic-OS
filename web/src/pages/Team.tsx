@@ -73,7 +73,7 @@ export default function Team() {
                   <button onClick={() => setSelected(t.id)}
                     className={`flex w-full cursor-pointer flex-col items-start gap-1 rounded-xl px-3 py-2.5 text-left transition-colors ${current?.id === t.id ? 'bg-white/80' : 'hover:bg-white/50'}`}>
                     <span className="line-clamp-2 text-sm text-ink">{t.message}</span>
-                    <span className="font-mono text-xs text-ink-3">{t.status === 'running' ? `running · ${t.active}` : `${t.steps.length} hops`} · {timeAgo(t.created)}</span>
+                    <span className="font-mono text-xs text-ink-3">{t.status === 'running' ? `running: ${t.active}` : `${t.steps.length} hops`}, {timeAgo(t.created)}</span>
                   </button>
                 </li>
               ))}
@@ -96,7 +96,7 @@ function ThreadView({ initial }: { initial: Thread }) {
   return (
     <div className="flex flex-col gap-4">
       <div>
-        <p className="text-xs font-medium uppercase tracking-[0.16em] text-ink-3">Task</p>
+        <p className="text-xs font-medium text-ink-3">Task</p>
         <p className="mt-1 text-[15px] leading-relaxed text-ink">{t.message}</p>
       </div>
       <ol className="flex flex-col">

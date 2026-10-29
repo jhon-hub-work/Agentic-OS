@@ -41,9 +41,9 @@ export default function Cost() {
                         <stop offset="0%" style={{ stopColor: 'var(--chart-a)' }} /><stop offset="100%" style={{ stopColor: 'var(--chart-b)' }} />
                       </linearGradient>
                     </defs>
-                    <XAxis dataKey="agent" tickLine={false} axisLine={false} tick={{ fill: '#7C8B99', fontSize: 12 }} />
-                    <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: '#7C8B99', fontSize: 12 }} />
-                    <Tooltip cursor={{ fill: 'rgba(255,255,255,0.5)' }} contentStyle={{ borderRadius: 12, border: '1px solid #fff', background: 'rgba(255,255,255,0.9)' }} />
+                    <XAxis dataKey="agent" tickLine={false} axisLine={false} tick={{ fill: 'var(--color-ink-3)', fontSize: 12 }} />
+                    <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: 'var(--color-ink-3)', fontSize: 12 }} />
+                    <Tooltip cursor={{ fill: 'rgba(255,255,255,0.5)' }} contentStyle={{ borderRadius: 12, border: '1px solid var(--color-white)', background: 'rgba(255,255,255,0.9)' }} />
                     <Bar dataKey="calls" fill="url(#chromeBar)" radius={[8, 8, 4, 4]} maxBarSize={48} />
                   </BarChart>
                 </ResponsiveContainer>
@@ -54,7 +54,7 @@ export default function Cost() {
             <h2 className="mb-3 text-sm font-medium text-ink-2">Recent calls</h2>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-sm">
-                <thead className="text-xs uppercase tracking-[0.12em] text-ink-3">
+                <thead className="text-xs text-ink-3">
                   <tr><th className="py-2 pr-4 font-medium">When</th><th className="py-2 pr-4 font-medium">Agent</th><th className="py-2 pr-4 font-medium">Model</th><th className="py-2 pr-4 text-right font-medium">Tokens</th><th className="py-2 text-right font-medium">Cost</th></tr>
                 </thead>
                 <tbody className="divide-y divide-white/80">

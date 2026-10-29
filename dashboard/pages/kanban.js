@@ -79,7 +79,7 @@ function renderKanbanBoard() {
             colTasks.map(t => `
               <div class="kanban-card" draggable="true" ondragstart="onKanbanDrag(event, '${t.id}')" onclick="showKanbanDetail('${t.id}')">
                 <div class="kanban-card-header">
-                  <span class="kanban-priority priority-${t.priority || 'medium'}">${t.priority || 'medium'}</span>
+                  <span class="kanban-priority priority-${t.priority || 'medium'}">${escapeHtml(t.priority || 'medium')}</span>
                 </div>
                 <div class="kanban-card-title">${escapeHtml(t.title)}</div>
                 ${t.body ? `<div class="kanban-card-desc">${escapeHtml(t.body.substring(0, 80))}${t.body.length > 80 ? '...' : ''}</div>` : ''}
@@ -219,14 +219,14 @@ function showKanbanDetail(id) {
         </div>
         <div class="modal-body">
           <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-            <span class="badge badge-${task.status === 'done' ? 'success' : task.status === 'in_progress' ? 'info' : 'warning'}">${task.status}</span>
-            <span class="kanban-priority priority-${task.priority || 'medium'}">${task.priority}</span>
+            <span class="badge badge-${task.status === 'done' ? 'success' : task.status === 'in_progress' ? 'info' : 'warning'}">${escapeHtml(task.status)}</span>
+            <span class="kanban-priority priority-${task.priority || 'medium'}">${escapeHtml(task.priority)}</span>
             ${task.status === 'blocked' ? `<span class="badge badge-danger">🚫 Blocked</span>` : ''}
           </div>
           ${task.body ? `<div style="margin-bottom:12px;color:var(--text-secondary);font-size:13px">${escapeHtml(task.body)}</div>` : ''}
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;font-size:12px">
             ${task.assignee ? `<span>👤 <strong>${escapeHtml(task.assignee)}</strong></span>` : ''}
-            <span>📅 <strong>${task.created || 'N/A'}</strong></span>
+            <span>📅 <strong>${escapeHtml(task.created || 'N/A')}</strong></span>
             ${task.completed_at ? `<span>✅ <strong>${task.completed_at}</strong></span>` : ''}
           </div>
           <div style="display:flex;gap:4px;flex-wrap:wrap">

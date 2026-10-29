@@ -18,13 +18,16 @@ import test_security  # noqa: E402
 import test_kanban_journal  # noqa: E402
 import test_memory_scheduler  # noqa: E402
 import test_v40  # noqa: E402
+import test_jobs_scheduler  # noqa: E402
+import test_jharvis_screen  # noqa: E402
+import test_skill_lab  # noqa: E402
 
 
 def main() -> int:
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for module in (test_core, test_security, test_kanban_journal,
-                   test_memory_scheduler, test_v40):
+                   test_memory_scheduler, test_v40, test_jobs_scheduler, test_jharvis_screen, test_skill_lab):
         suite.addTests(loader.loadTestsFromModule(module))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

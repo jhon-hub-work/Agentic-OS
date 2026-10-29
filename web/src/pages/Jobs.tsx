@@ -53,6 +53,7 @@ function Board({ who, person }: { who: string; person?: { name: string; summary?
   const [link, setLink] = useState('')
   const [adding, setAdding] = useState(false)
   const [addMsg, setAddMsg] = useState('')
+  const [runErr, setRunErr] = useState('')
   const run = data?.runs[0]
 
   async function addLink(e: React.FormEvent) {
@@ -71,22 +72,23 @@ function Board({ who, person }: { who: string; person?: { name: string; summary?
     .filter((p, i) => i <= 3 || p.n > 0 || p.id === platform)
 
   async function runNow() {
-    setStarting(true)
-    try { await api.runJobSearch(who) } finally { setStarting(false) }
+    setStarting(true); setRunErr('')
+    try { await api.runJobSearch(who) } catch (err) { setRunErr((err as Error).message) } finally { setStarting(false) }
   }
 
   return (
     <>
-      <PageHead eyebrow={who ? `Jobs · ${person?.name ?? ''}` : 'Jobs · me'} title={who ? `${person?.name ?? ''}'s job search` : 'Job search'}
+      <PageHead eyebrow={who ? `Jobs: ${person?.name ?? ''}` : 'Jobs: me'} title={who ? `${person?.name ?? ''}'s job search` : 'Job search'}
         sub={who ? `Bookkeeping roles on OnlineJobs.ph for ${person?.name ?? ''}: $8/h floor, Australian clients ranked first, same rules as yours. Clean drafts are sent from her own Brave; anything only she can do waits here.` : "Found on OnlineJobs.ph, company boards and public boards, filtered by Hoot's rules, scored by OpenCode, drafted by Claude. Nothing goes out until you Approve; then the OS applies like Hoot, or hands it to you when only you can finish."}
         action={<ChromeButton onClick={runNow} disabled={starting || data?.running} icon={<MagnifyingGlass size={16} weight="bold" aria-hidden="true" />}>{data?.running ? 'Searching' : 'Search now'}</ChromeButton>} />
       {error && <ErrorLine msg={error} />}
+      {runErr && <p role="alert" className="mb-5 text-sm text-bad">Search didn't start: {runErr}</p>}
       {run && (
         <Panel className="mb-5" inner="grid grid-cols-2 gap-4 sm:grid-cols-4">
           {[['Found', run.fetched], ['New', run.new], ['Passed rules', run.kept], ['Drafted', run.drafted]].map(([k, v]) => (
             <div key={k}><p className="text-xs text-ink-3">{k}</p><p className="font-mono text-2xl text-ink">{v}</p></div>
           ))}
-          <p className="col-span-2 text-xs text-ink-3 sm:col-span-4">Last run {timeAgo(run.started)}{run.errors.length ? ` · ${run.errors.length} source problem(s): ${run.errors.join('; ')}` : ''}</p>
+          <p className="col-span-2 text-xs text-ink-3 sm:col-span-4">Last run {timeAgo(run.started)}{run.errors.length ? `, ${run.errors.length} source problem(s): ${run.errors.join('; ')}` : ''}</p>
         </Panel>
       )}
       <div className="mb-5 flex flex-wrap items-center gap-2 text-sm">
@@ -131,7 +133,11 @@ function Board({ who, person }: { who: string; person?: { name: string; summary?
 function JobCard({ j, who }: { j: JobPost; who: string }) {
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
-  const act = async (d: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') => { setBusy(true); try { await api.decideJob(j.id, d, who) } finally { setBusy(false) } }
+  const [err, setErr] = useState('')
+  const act = async (d: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') => {
+    setBusy(true); setErr('')
+    try { await api.decideJob(j.id, d, who) } catch (x) { setErr((x as Error).message) } finally { setBusy(false) }
+  }
   const copy = async (t = j.draft) => { await navigator.clipboard.writeText(t); setCopied(true); setTimeout(() => setCopied(false), 1500) }
   const btn = 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:opacity-50'
   return (
@@ -141,7 +147,7 @@ function JobCard({ j, who }: { j: JobPost; who: string }) {
           <a href={j.url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-[15px] font-medium text-ink hover:underline">
             <span className="truncate">{j.title}</span><ArrowSquareOut size={14} aria-hidden="true" className="shrink-0" />
           </a>
-          <p className="text-sm text-ink-3">{j.company} · {j.source} · {j.pay || 'pay not stated'}</p>
+          <p className="text-sm text-ink-3">{j.company}, {j.source}, {j.pay || 'pay not stated'}</p>
         </div>
         {j.score != null && <span className="chrome shrink-0 rounded-full px-3 py-1 font-mono text-xs">{j.score.toFixed(1)}</span>}
       </div>
@@ -173,6 +179,7 @@ function JobCard({ j, who }: { j: JobPost; who: string }) {
         {j.status === 'applied' && <button onClick={() => act('replied')} disabled={busy} className={btn}><Check size={14} aria-hidden="true" />Got a reply</button>}
         {j.status === 'handoff' && <button onClick={() => act('applied')} disabled={busy} className={btn}><Check size={14} aria-hidden="true" />I applied</button>}
       </div>
+      {err && <p role="alert" className="text-sm text-bad">{err}</p>}
     </Panel>
   )
 }

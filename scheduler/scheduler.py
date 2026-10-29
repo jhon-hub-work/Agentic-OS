@@ -71,7 +71,14 @@ def get_history(limit: int = 100) -> list:
 def load_job_definitions() -> list:
     jobs = []
     for f in sorted(JOBS_DIR.glob("*.json")):
-        data = json.loads(f.read_text())
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError) as e:  # one bad or half-written file must not drop every schedule
+            print(f"  Skipped job file {f.name}: {e}")
+            continue
+        if not isinstance(data, dict):
+            print(f"  Skipped job file {f.name}: not a JSON object")
+            continue
         data["_file"] = str(f)
         jobs.append(data)
     return jobs
@@ -197,17 +204,24 @@ class CronScheduler:
         if not self._scheduler:
             return
         from apscheduler.triggers.cron import CronTrigger as CT
-        for job in self._scheduler.get_jobs():
-            job.remove()
+        # Build every trigger first, then swap: a bad cron line must not leave the others unscheduled.
+        ready = []
         for data in load_job_definitions():
             if not data.get("enabled", True):
                 continue
             try:
+                ready.append((data, CT.from_crontab(data["cron"]), data.get("id", data["name"])))
+            except Exception as e:
+                print(f"  Failed to schedule {data.get('name')}: {e}")
+        for job in self._scheduler.get_jobs():
+            job.remove()
+        for data, trigger, jid in ready:
+            try:
                 self._scheduler.add_job(
                     run_job,
-                    CT.from_crontab(data["cron"]),
+                    trigger,
                     args=[data, "cron"],
-                    id=data.get("id", data["name"]),
+                    id=jid,
                     name=data["name"],
                     replace_existing=True,
                     misfire_grace_time=60,

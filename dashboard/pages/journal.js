@@ -128,7 +128,7 @@ async function loadJournalEntries() {
       <div style="display:flex;flex-wrap:wrap;gap:8px">
         ${entries.slice(0, 30).map(e => `
           <button class="btn btn-sm ${e.date === journalCurrentDate ? 'btn-primary' : 'btn-ghost'}" onclick="loadJournalEntry('${e.date}');document.getElementById('journalDatePicker').value='${e.date}'">
-            ${e.date}
+            ${escapeHtml(e.date)}
           </button>
         `).join('')}
       </div>
@@ -154,7 +154,7 @@ async function searchJournal() {
       <div class="section-title">Results for "${escapeHtml(q)}"</div>
       ${results.map(r => `
         <div class="card" style="cursor:pointer;margin-bottom:8px" onclick="loadJournalEntry('${r.date}');document.getElementById('journalDatePicker').value='${r.date}'">
-          <div style="font-size:13px;font-weight:600;margin-bottom:4px">${r.date}</div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:4px">${escapeHtml(r.date)}</div>
           <div class="text-muted text-sm">${escapeHtml(r.preview)}</div>
         </div>
       `).join('')}

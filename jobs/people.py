@@ -67,7 +67,7 @@ def scan(p: dict, seen: set, log=print) -> list:
         return []
 
 
-def score_batch(p: dict, jobs: list, run_agent) -> None:
+def score_batch(p: dict, jobs: list, run_agent) -> int:
     listing = "\n\n".join(f"#{i} | {j['title']} | {j['company']} | {j.get('pay') or 'pay not stated'}\n{(j.get('jd') or '')[:1200]}"
                           for i, j in enumerate(jobs))
     prompt = (f"Score each job posting for {p['name']}, {p.get('profile_summary') or 'a bookkeeper'}.\n"
@@ -75,10 +75,7 @@ def score_batch(p: dict, jobs: list, run_agent) -> None:
               f"{p['name']} can do: a test task, a video/audio recording of themselves, a call, or an account login.\n"
               "Reply with ONLY a JSON array: [{\"i\": 0, \"score\": 4.0, \"reason\": \"...\", \"needs_you\": false, "
               "\"needs_why\": \"\"}]\n\n" + listing)
-    for r in pipeline.first_json(run_agent("opencode", prompt), "[") or []:
-        if isinstance(r, dict) and isinstance(r.get("i"), int) and 0 <= r["i"] < len(jobs):
-            jobs[r["i"]].update(score=float(r.get("score") or 0), reason=str(r.get("reason") or "")[:300],
-                                needs_you=bool(r.get("needs_you")), needs_why=str(r.get("needs_why") or "")[:200])
+    return pipeline.apply_scores(jobs, pipeline.first_json(run_agent("opencode", prompt), "[") or [])
 
 
 def draft(p: dict, job: dict, run_agent, cv: str) -> str:
@@ -90,14 +87,13 @@ def draft(p: dict, job: dict, run_agent, cv: str) -> str:
 
 def run(pid: str, run_agent, log=print) -> dict:
     p, path = PEOPLE[pid], board(pid)
-    seen = set(pipeline.load(_seen(pid), []))
+    seen = pipeline.load_seen(_seen(pid))
     stats = {"started": pipeline.now(), "fetched": 0, "new": 0, "kept": 0, "scored": 0, "drafted": 0, "needs_you": 0, "errors": []}
     note = lambda m: log(m) or (stats["errors"].append(m) if "failed" in m else None)
     offers = scan(p, seen, note)
     stats["fetched"] = len(offers)
     fresh = [o for o in offers if pipeline.job_id(o["url"]) not in seen]
     stats["new"] = len(fresh)
-    seen.update(pipeline.job_id(o["url"]) for o in offers)
 
     floor = float(p.get("min_hourly_usd", 8))
     kept = [o for o in fresh if not lanes.tracker(o.get("jd") or "")
@@ -106,11 +102,15 @@ def run(pid: str, run_agent, log=print) -> dict:
     to_score = kept[:MAX_SCORE]
     for i in range(0, len(to_score), pipeline.BATCH):
         try:
-            score_batch(p, to_score[i:i + pipeline.BATCH], run_agent)
+            if not score_batch(p, to_score[i:i + pipeline.BATCH], run_agent):
+                note(f"scoring failed: batch {i // pipeline.BATCH + 1} got no scores back")
         except Exception as e:  # noqa: BLE001 - one bad batch must not stop the run
             stats["errors"].append(f"scoring failed: {e}")
     scored = [j for j in to_score if "score" in j]
     stats["scored"] = len(scored)
+    # Unscored offers (past MAX_SCORE or a batch that didn't parse) stay unseen so they come back next run.
+    kept_ids = {id(o) for o in kept}
+    pipeline.mark_seen(seen, [pipeline.job_id(o["url"]) for o in offers if id(o) not in kept_ids or "score" in o])
     for j in scored:
         if australian(j):
             j["score"] = min(5.0, j["score"] + AU_BONUS)
@@ -141,11 +141,12 @@ def run(pid: str, run_agent, log=print) -> dict:
         for j in new_items + b["jobs"]:
             if j["id"] in drafted and j["status"] == "queued":
                 j.update(drafted[j["id"]])
-        b["jobs"] = (new_items + b["jobs"])[:300]
+        all_jobs = new_items + b["jobs"]
+        b["jobs"] = all_jobs[:300]
         stats["finished"] = pipeline.now()
         b["runs"] = ([stats] + b["runs"])[:50]
         pipeline.save(path, b)
-    pipeline.save(_seen(pid), sorted(seen)[-5000:])
+    pipeline.save_seen(_seen(pid), seen, all_jobs)
     return stats
 
 

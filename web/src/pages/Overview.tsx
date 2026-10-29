@@ -82,7 +82,7 @@ export default function Overview({ go }: { go: (page: string) => void }) {
             <ul className="flex flex-col gap-3">
               {[...audit.data.entries].reverse().slice(0, 5).map((e, i) => (
                 <li key={e.id ?? i} className="flex items-baseline justify-between gap-3 text-sm">
-                  <span className="truncate text-ink">{e.action.replace(/_/g, ' ')}{e.agent ? ` · ${e.agent}` : ''}{e.skill ? ` · ${e.skill}` : ''}</span>
+                  <span className="truncate text-ink">{e.action.replace(/_/g, ' ')}{e.agent ? `, ${e.agent}` : ''}{e.skill ? `, ${e.skill}` : ''}</span>
                   <span className="shrink-0 font-mono text-xs text-ink-3">{timeAgo(e.timestamp)}</span>
                 </li>
               ))}

@@ -95,7 +95,7 @@ export default function ThemeSwitch({ className = '' }: { className?: string }) 
       if (dark) {
         // the real light page is vacuumed into the hole over darkness...
         const dur = 900
-        root.style.background = '#0A111C'
+        root.style.background = 'var(--color-night)'
         pin(true); body.classList.add('sucking')
         const anim = body.animate(frames, { duration: dur, fill: 'forwards', easing: 'cubic-bezier(.55,.05,.85,.35)' })
         hole.animate([{ transform: 'scale(1)' }, { transform: 'scale(1.2)', offset: .5 }, { transform: 'scale(1.45)', offset: .9 }, { transform: 'scale(1)' }], { duration: dur, easing: 'ease-in-out' })

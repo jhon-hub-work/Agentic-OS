@@ -22,8 +22,8 @@ const level = (an: AnalyserNode, buf: Uint8Array<ArrayBuffer>, gain: number) => 
 }
 
 /** Jharvis's voice on his page: subtitles, mic, a keyboard for quiet rooms, mute.
- *  Drives the waves through `energy` (mic or his voice) and `mood` (colour of his reply). */
-export default function JharvisTalk({ energy, mood, onReply, sample }: { energy: { current: number }; mood: { current: Mood }; onReply: () => void; sample?: string }) {
+ *  Drives the waves through `energy` (mic or his voice), `mood` (colour of his reply) and `speaking` (his voice only). */
+export default function JharvisTalk({ energy, mood, speaking, onReply, sample }: { energy: { current: number }; mood: { current: Mood }; speaking?: { current: boolean }; onReply: () => void; sample?: string }) {
   const [subtitle, setSubtitle] = useState(sample ?? '')
   const [status, setStatus] = useState<'idle' | 'listening' | 'transcribing' | 'thinking'>('idle')
   const [typing, setTyping] = useState(false)
@@ -85,6 +85,8 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
 
   async function speak(reply: string) {
     if (mutedRef.current) { settle(10000); again(); return }
+    // the dots rise into his orb or face while the voice is made (several seconds), so it's formed when he starts
+    if (speaking) speaking.current = true
     try {
       // VoiceStudio voice via the OS; the waves follow the real audio level
       const r = await fetch('/api/jharvis/speak', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: reply }) })
@@ -99,16 +101,16 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
       const buf = new Uint8Array(an.fftSize)
       let raf = 0
       const loop = () => { energy.current = level(an, buf, 5); raf = requestAnimationFrame(loop) }
-      src.onended = () => { cancelAnimationFrame(raf); energy.current = 0; settle(); again() }
+      src.onended = () => { cancelAnimationFrame(raf); energy.current = 0; if (speaking) speaking.current = false; settle(); again() }
       stopSpeech.current(); stopSpeech.current = () => { try { src.stop() } catch { /* already ended */ } }
       src.start(); loop()
     } catch {
-      if (!('speechSynthesis' in window)) { settle(); again(); return }  // VoiceStudio off: fall back to the browser voice
+      if (!('speechSynthesis' in window)) { if (speaking) speaking.current = false; settle(); again(); return }  // VoiceStudio off: fall back to the browser voice
       const u = new SpeechSynthesisUtterance(reply.replace(/[*_`#>\[\]()]/g, '').slice(0, 600))
       let on = true
       const pump = () => { if (on) { energy.current = 0.35 + Math.random() * 0.5; setTimeout(pump, 110) } }
-      u.onstart = pump
-      u.onend = u.onerror = () => { on = false; energy.current = 0; settle(); again() }
+      u.onstart = () => { if (speaking) speaking.current = true; pump() }
+      u.onend = u.onerror = () => { on = false; energy.current = 0; if (speaking) speaking.current = false; settle(); again() }
       speechSynthesis.cancel()
       speechSynthesis.speak(u)
     }
@@ -238,7 +240,7 @@ export default function JharvisTalk({ energy, mood, onReply, sample }: { energy:
         <button onClick={toggleMic} aria-pressed={handsFree} aria-label={handsFree ? 'End the conversation' : 'Talk'}
           title={handsFree ? 'Talking hands-free. Tap to end.' : 'Tap once, then just talk'}
           className={`relative flex h-16 w-16 cursor-pointer items-center justify-center rounded-full border transition-transform active:scale-95 ${handsFree ? 'chrome border-transparent' : 'border-white/80 bg-white/50 text-ink backdrop-blur-md hover:bg-white/80'}`}>
-          {status === 'listening' && <span className="absolute inset-0 animate-ping rounded-full border-2 border-[#3FB6EC]/60" aria-hidden="true" />}
+          {status === 'listening' && <span className="absolute inset-0 animate-ping rounded-full border-2 border-glacier/60" aria-hidden="true" />}
           {handsFree ? <Stop size={22} weight="fill" /> : <Microphone size={24} />}
         </button>
         <button onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'Unmute Jharvis' : 'Mute Jharvis'} className={roundBtn}>

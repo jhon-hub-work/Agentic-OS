@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -63,7 +64,37 @@ def save(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(path)
+    for attempt in range(10):  # Windows refuses the replace while the dashboard has board.json open
+        try:
+            tmp.replace(path)
+            break
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.05)
+
+
+SEEN_DAYS = 90  # a posting not fetched again for this long may come back as new
+
+
+def load_seen(path: Path) -> dict:
+    """{job id: last fetched (iso) or "keep"}. The old file was a plain list of ids."""
+    data = load(path, {})
+    return dict.fromkeys(data, now()) if isinstance(data, list) else data
+
+
+def save_seen(path: Path, seen: dict, board_jobs: list) -> None:
+    """Board jobs are kept for good: one that falls off the 300-job board must never come back as new."""
+    seen.update(dict.fromkeys((j["id"] for j in board_jobs), "keep"))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_DAYS)).isoformat()
+    save(path, {k: v for k, v in seen.items() if v == "keep" or v >= cutoff})
+
+
+def mark_seen(seen: dict, ids) -> None:
+    stamp = now()
+    for i in ids:
+        if seen.get(i) != "keep":
+            seen[i] = stamp
 
 
 # Jhon, 2026-10-28: (hourly, monthly) floors in USD per lane; other lanes use config/owner.json below.
@@ -88,18 +119,20 @@ def pay_ok(job: dict) -> bool:
 
 def first_json(text: str, opener: str):
     """The first JSON array/object in an agent's reply (they often wrap it in prose or fences)."""
-    start = text.find(opener)
-    if start < 0:
-        return None
-    closer = "]" if opener == "[" else "}"
-    end = text.rfind(closer)
-    try:
-        return json.loads(text[start:end + 1])
-    except ValueError:
-        return None
+    # Decode from each opener in turn: cutting at the last closer broke on prose like "scores [1-5]" after the array.
+    dec, start = json.JSONDecoder(), text.find(opener)
+    while start >= 0:
+        try:
+            val = dec.raw_decode(text, start)[0]
+            if opener == "{" or all(isinstance(x, dict) for x in val):  # skip footnotes like "[1]"
+                return val
+        except ValueError:
+            pass
+        start = text.find(opener, start + 1)
+    return None
 
 
-def score_batch(jobs: list, run_agent) -> None:
+def score_batch(jobs: list, run_agent) -> int:
     listing = "\n\n".join(
         f"#{i} | {j['title']} | {j['company']} | {j.get('pay') or 'pay not stated'}\n{(j.get('jd') or '')[:1200]}"
         for i, j in enumerate(jobs)
@@ -111,11 +144,16 @@ def score_batch(jobs: list, run_agent) -> None:
         "Reply with ONLY a JSON array: [{\"i\": 0, \"score\": 4.0, \"reason\": \"...\", \"needs_you\": false, "
         "\"needs_why\": \"\"}]\n\n" + listing
     )
-    result = first_json(run_agent("opencode", prompt), "[") or []
+    return apply_scores(jobs, first_json(run_agent("opencode", prompt), "[") or [])
+
+
+def apply_scores(jobs: list, result: list) -> int:
+    """Put an agent's score rows on the jobs; how many jobs got a score."""
     for r in result:
         if isinstance(r, dict) and isinstance(r.get("i"), int) and 0 <= r["i"] < len(jobs):
             jobs[r["i"]].update(score=float(r.get("score") or 0), reason=str(r.get("reason") or "")[:300],
                                 needs_you=bool(r.get("needs_you")), needs_why=str(r.get("needs_why") or "")[:200])
+    return sum("score" in j for j in jobs)
 
 
 def draft(job: dict, run_agent, cv: str, answers: str) -> str:
@@ -181,7 +219,7 @@ def run(run_agent, log=print, after=None) -> dict:
     """One full pass. run_agent(agent, prompt) -> text is the OS's execute_agent. after() runs once the drafts are on
     the board (auto-apply) and returns how many went out; "finished" is stamped after it, so reports include the sends."""
     board = load(BOARD, {"jobs": [], "runs": []})
-    seen = set(load(SEEN, []))
+    seen = load_seen(SEEN)
     stats = {"started": now(), "fetched": 0, "new": 0, "kept": 0, "scored": 0, "drafted": 0, "needs_you": 0, "errors": []}
 
     note = lambda m: log(m) or (stats["errors"].append(m) if "failed" in m else None)
@@ -194,23 +232,27 @@ def run(run_agent, log=print, after=None) -> dict:
             known.add(same_job(o))
             fresh.append(o)
     stats["new"] = len(fresh)
-    seen.update(job_id(o["url"]) for o in offers)
 
-    kept = []
+    # Only offers that got an answer (rejected here, scored, a duplicate, or seen before: re-stamped so a posting
+    # still listed doesn't age out) are marked seen; the rest
+    # (past MAX_SCORE, or in a batch whose reply didn't parse) come back next run.
+    kept, done = [], []
     for o in fresh:
         why = lanes.gate(o, o.get("jd") or "") or ("" if pay_ok(o) else "pays under the pay floor")
-        if not why:
-            kept.append(o)
+        (done if why else kept).append(o)
     stats["kept"] = len(kept)
 
     to_score = kept[:MAX_SCORE]
     for i in range(0, len(to_score), BATCH):
         try:
-            score_batch(to_score[i:i + BATCH], run_agent)
+            if not score_batch(to_score[i:i + BATCH], run_agent):
+                note(f"scoring failed: batch {i // BATCH + 1} got no scores back")
         except Exception as e:  # noqa: BLE001 - one bad batch must not stop the run
             stats["errors"].append(f"scoring failed: {e}")
     scored = [j for j in to_score if "score" in j]
     stats["scored"] = len(scored)
+    fresh_ids = {id(o) for o in fresh}
+    mark_seen(seen, [job_id(o["url"]) for o in done + scored + [o for o in offers if id(o) not in fresh_ids]])
 
     cv = CV.read_text(encoding="utf-8") if CV.exists() else ""
     answers = ANSWERS.read_text(encoding="utf-8") if ANSWERS.exists() else ""
@@ -240,10 +282,11 @@ def run(run_agent, log=print, after=None) -> dict:
         for j in board["jobs"]:
             if j["id"] in drafted_queue and j["status"] == "queued":
                 j.update(drafted_queue[j["id"]])
-        board["jobs"] = (new_items + board["jobs"])[:300]
+        all_jobs = new_items + board["jobs"]
+        board["jobs"] = all_jobs[:300]
         board["runs"] = ([stats] + board["runs"])[:50]
         save(BOARD, board)
-    save(SEEN, sorted(seen)[-5000:])
+    save_seen(SEEN, seen, all_jobs)
     stats["auto_sent"] = after() if after else 0
     stats["finished"] = now()
     with BOARD_LOCK:
@@ -389,6 +432,8 @@ def set_fields(jid: str, path: Path = BOARD, **fields) -> None:
 
 def _selftest():
     assert first_json('sure:\n```json\n[{"i":0,"score":4}]\n```', "[") == [{"i": 0, "score": 4}]
+    assert first_json('see [1]: [{"i":0,"score":4}]\nscores are [1-5]', "[") == [{"i": 0, "score": 4}]
+    assert first_json("no json here [1-5]", "[") is None
     assert leaks("Hi, I built this with my auto-apply bot " + "x" * 80) == "mentions automation"
     assert leaks("I edit short videos for a client, about twenty reels a week. " * 2) == ""
     if PRIVATE:

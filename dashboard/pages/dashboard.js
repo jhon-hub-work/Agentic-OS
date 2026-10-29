@@ -72,8 +72,8 @@ async function renderDashboard() {
           return `<div class="agent-card">
             <div class="agent-dot ${a.status}" style="width:10px;height:10px"></div>
             <div>
-              <div style="font-weight:600;font-size:13px">${a.name}</div>
-              <div style="font-size:11px;color:${sc.text}">${a.status}</div>
+              <div style="font-weight:600;font-size:13px">${escapeHtml(a.name)}</div>
+              <div style="font-size:11px;color:${sc.text}">${escapeHtml(a.status)}</div>
             </div>
           </div>`;
         }).join('')}

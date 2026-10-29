@@ -1,7 +1,7 @@
 import { Plug, Plus } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
-import { AGENT_META, api, loadAgents, type AgentName, type Plugin } from '../api'
-import { AgentLogo, AgentPicker, ChromeButton, Field, PageHead, Panel, Skeleton, inputCls } from '../ui'
+import { AGENT_META, api, loadAgents, type AgentName, type ModelChoice, type Plugin } from '../api'
+import { AgentLogo, AgentPicker, ChromeButton, Field, ModelPick, PageHead, Panel, Skeleton, inputCls, useModelInfo } from '../ui'
 
 const MCP_AGENTS = ['claude', 'opencode', 'hermes', 'agy']  // added agents have no MCP command
 
@@ -36,38 +36,53 @@ export default function Agents() {
   )
 }
 
+/** Each agent's default model + effort (data/settings.json); Chats and Sessions can change them for one chat or session. */
 function Models() {
-  const [opts, setOpts] = useState<Record<string, string[]>>({})
-  const [models, setModels] = useState<Record<string, string>>({})
-  const [saved, setSaved] = useState(false)
+  const [models, setModels] = useState<Record<string, string> | null>(null)
+  const [efforts, setEfforts] = useState<Record<string, string>>({})
+  const [edits, setEdits] = useState(0)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   useEffect(() => {
-    api.settings().then(s => setModels(s.models ?? {}))
-    ;(['claude', 'opencode'] as const).forEach(a => api.models(a).then(r => {
-      setOpts(o => ({ ...o, [a]: r.models }))
-      setModels(m => ({ ...m, [a]: m[a] ?? r.current }))
-    }))
+    api.settings().then(s => { setModels(s.models ?? {}); setEfforts(s.efforts ?? {}) }).catch(e => setMsg({ ok: false, text: e.message }))
   }, [])
-  async function save(agent: string, model: string) {
-    const next = { ...models, [agent]: model }
-    setModels(next); setSaved(false)
-    await api.saveModels(next); setSaved(true)
+  useEffect(() => {
+    if (!edits || !models) return
+    const t = setTimeout(() => {  // a typed model name saves once typing stops, not per letter
+      const set = (r: Record<string, string>) => Object.fromEntries(Object.entries(r).filter(([, v]) => v))
+      api.saveModels(set(models), set(efforts)).then(() => setMsg({ ok: true, text: 'Saved. Used from the next message.' }))
+        .catch(e => setMsg({ ok: false, text: e.message }))
+    }, 700)
+    return () => clearTimeout(t)
+  }, [edits])  // eslint-disable-line react-hooks/exhaustive-deps
+  function change(agent: string, v: ModelChoice) {
+    setModels(m => ({ ...m, [agent]: v.model ?? '' })); setEfforts(e => ({ ...e, [agent]: v.effort ?? '' }))
+    setEdits(n => n + 1); setMsg(null)
   }
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="text-sm font-medium text-ink-2">Models</h2>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {(['claude', 'opencode'] as const).map(a => (
-          <Field key={a} id={`m-${a}`} label={a === 'claude' ? 'Claude Code (your subscription)' : 'OpenCode (Zen models)'}>
-            {!opts[a] ? <Skeleton className="h-12" /> : (
-              <select id={`m-${a}`} value={models[a] ?? ''} onChange={e => save(a, e.target.value)} className={inputCls}>
-                {opts[a].map(m => <option key={m} value={m}>{m.replace('opencode/', '')}</option>)}
-              </select>
-            )}
-          </Field>
-        ))}
+      <div>
+        <h2 className="text-sm font-medium text-ink-2">Models</h2>
+        <p className="text-xs text-ink-3">Each agent's default model and effort. Default = what the agent uses on its own. Chats and Sessions can change them for one chat or session.</p>
       </div>
-      <p className="text-xs text-ink-3" aria-live="polite">{saved ? 'Saved. Used from the next message.' : 'Hermes and agy use the model set in their own apps.'}</p>
+      {!models ? <Skeleton className="h-24" /> : (
+        <ul className="flex flex-col gap-2">
+          {Object.keys(AGENT_META).map(a => <ModelRow key={a} agent={a} value={{ model: models[a] ?? '', effort: efforts[a] ?? '' }} onChange={v => change(a, v)} />)}
+        </ul>
+      )}
+      <p aria-live="polite" className={`text-xs ${msg && !msg.ok ? 'text-bad' : 'text-ink-3'}`}>{msg?.text ?? 'An added agent gets a choice here when it has model or effort flags.'}</p>
     </div>
+  )
+}
+
+function ModelRow({ agent, value, onChange }: { agent: string; value: ModelChoice; onChange: (v: ModelChoice) => void }) {
+  const info = useModelInfo(agent)
+  if (info && info.models === null && !info.efforts.length) return null  // an added agent without model/effort flags
+  return (
+    <li className="flex flex-wrap items-center gap-3 rounded-2xl border border-white bg-white/55 p-3">
+      <AgentLogo name={agent} size={30} />
+      <span className="w-28 text-sm font-medium text-ink">{AGENT_META[agent].label}</span>
+      <ModelPick agent={agent} info={info} value={value} onChange={onChange} base={{ model: info?.default ?? '', effort: '' }} />
+    </li>
   )
 }
 
@@ -131,7 +146,7 @@ function Relogin() {
           {accounts.map(a => (
             <li key={a.id} className="flex flex-wrap items-center gap-3 rounded-2xl border border-white bg-white/50 px-4 py-3">
               <span className="font-medium text-ink">{a.label}</span>
-              <span className={`text-xs ${a.overdue ? 'text-bad' : 'text-ink-3'}`}>{a.overdue ? `Due since ${day(a.due)}` : `Next: ${day(a.due)}`} · last {day(a.last)}</span>
+              <span className={`text-xs ${a.overdue ? 'text-bad' : 'text-ink-3'}`}>{a.overdue ? `Due since ${day(a.due)}` : `Next: ${day(a.due)}`}, last {day(a.last)}</span>
               <span className="ml-auto flex gap-2">
                 <button type="button" onClick={() => post(`/api/reauth/${a.id}/start`).then(() => setMsg(`A window opened on the PC for ${a.label}. Log in there, then tap Done.`))}
                   className="chrome min-h-10 cursor-pointer rounded-full px-4 text-sm font-medium">Log out &amp; in</button>
@@ -175,11 +190,11 @@ function Plugins() {
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-ink">{p.name}</p>
                 <p className="line-clamp-2 text-xs text-ink-3">{p.description || p.id}</p>
-                <p className="mt-1 text-[11px] text-ink-3">{[p.skills && 'skills', Object.keys(p.mcp).length > 0 && 'tool server'].filter(Boolean).join(' · ') || 'hooks/commands only'}</p>
+                <p className="mt-1 text-[11px] text-ink-3">{[p.skills && 'skills', Object.keys(p.mcp).length > 0 && 'tool server'].filter(Boolean).join(', ') || 'hooks/commands only'}</p>
               </div>
               <button role="switch" aria-checked={p.enabled} aria-label={`${p.name} for every agent`} disabled={busy !== null} onClick={() => flip(p)}
                 className={`relative h-7 w-12 shrink-0 cursor-pointer rounded-full border transition-colors disabled:opacity-50 ${p.enabled ? 'border-navy bg-navy' : 'border-ink-3/40 bg-ink-3/25'}`}>
-                <span className={`absolute top-0.5 h-5.5 w-5.5 rounded-full bg-white shadow transition-all ${p.enabled ? 'left-[1.4rem]' : 'left-0.5'}`} />
+                <span className={`absolute top-0.5 h-5.5 w-5.5 rounded-full left-0.5 bg-white shadow transition-transform ${p.enabled ? 'translate-x-[1.275rem]' : ''}`} />
               </button>
             </li>
           ))}
@@ -193,13 +208,14 @@ function Plugins() {
 
 // Known CLIs, filled in with their read-only switch. The prompt goes in on stdin unless the command has {prompt}.
 const PRESETS = [
-  { id: 'codex', label: 'Codex', role: 'Second opinion on code and plans (OpenAI)', command: 'codex exec --sandbox read-only --skip-git-repo-check --color never -', relogin: 'codex logout && codex login' },
+  { id: 'codex', label: 'Codex', role: 'Second opinion on code and plans (OpenAI)', command: 'codex exec --sandbox read-only --skip-git-repo-check --color never -', relogin: 'codex logout && codex login',
+    model_args: '-m {model}', effort_args: '-c model_reasoning_effort={effort}' },
 ]
 
 /** Jhon's own command-line agents: they join chats, sessions, teams and schedules like the built-in four. */
 function MyAgents() {
   const [list, setList] = useState(() => Object.entries(AGENT_META).filter(([, m]) => m.custom))
-  const [f, setF] = useState({ id: '', label: '', role: '', command: '', timeout: 600, relogin: '' })
+  const [f, setF] = useState({ id: '', label: '', role: '', command: '', timeout: 600, relogin: '', model_args: '', effort_args: '' })
   const [logo, setLogo] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
@@ -215,7 +231,7 @@ function MyAgents() {
       if (logo) await api.uploadAgentLogo(r.id, logo)
       await refresh()
       setMsg({ ok: true, text: `Added ${r.label}. Test answer: "${r.test_answer}"${logo ? '' : r.logo ? ' Logo found automatically.' : ' No logo found online: upload one if you like.'}` })
-      setF({ id: '', label: '', role: '', command: '', timeout: 600, relogin: '' }); setLogo(null)
+      setF({ id: '', label: '', role: '', command: '', timeout: 600, relogin: '', model_args: '', effort_args: '' }); setLogo(null)
     } catch (x) { setMsg({ ok: false, text: (x as Error).message }) } finally { setBusy(false) }
   }
   async function findLogo(id: string) {
@@ -258,6 +274,14 @@ function MyAgents() {
         <Field id="ag-relogin" label="Re-login command (if it needs a login)" help="Logs it out and back in. It then joins the weekly re-login card above.">
           <input id="ag-relogin" value={f.relogin} onChange={set('relogin')} placeholder="codex logout && codex login" className={`${inputCls} font-mono text-sm`} />
         </Field>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Field id="ag-model" label="Model flag (optional)" help="How it picks a model, with {model}. Empty = no model choice for this agent.">
+            <input id="ag-model" value={f.model_args} onChange={set('model_args')} placeholder="-m {model}" className={`${inputCls} font-mono text-sm`} />
+          </Field>
+          <Field id="ag-effort" label="Effort flag (optional)" help="How it sets reasoning effort, with {effort} (low to xhigh).">
+            <input id="ag-effort" value={f.effort_args} onChange={set('effort_args')} placeholder="-c model_reasoning_effort={effort}" className={`${inputCls} font-mono text-sm`} />
+          </Field>
+        </div>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <Field id="ag-timeout" label="Time limit (seconds)"><input id="ag-timeout" type="number" min={30} max={1800} value={f.timeout} onChange={set('timeout')} className={inputCls} /></Field>
           <Field id="ag-logo" label="Logo (optional)" help="SVG, PNG, WebP or JPG, up to 300 KB.">

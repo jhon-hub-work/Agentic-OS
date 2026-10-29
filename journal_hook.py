@@ -24,8 +24,13 @@ def main():
         return
     f = Path(path) if Path(path).is_absolute() else Path(ev.get("cwd", ".")) / path
     f = f.resolve()
-    h = sha(f)
     pre = ev.get("hook_event_name") == "PreToolUse"
+    try:
+        h = sha(f)
+    except OSError:
+        if pre:
+            raise  # no before-copy: block the edit
+        h = "unknown"  # edited but unreadable now: the line still goes in, so Undo refuses this file instead of skipping it
     if pre and h:
         blob = root / "blobs" / h
         if not blob.exists():

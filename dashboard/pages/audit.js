@@ -66,7 +66,7 @@ function applyAuditFilter() {
           ${filtered.slice(0, 100).map(e => `
             <tr>
               <td style="font-size:12px;white-space:nowrap">${formatDate(e.timestamp)}</td>
-              <td><span class="badge ${e.action === 'skill_run' ? 'badge-success' : e.action === 'brain_update' ? 'badge-info' : e.action === 'backup_created' ? 'badge-accent' : 'badge-warning'}">${e.action}</span></td>
+              <td><span class="badge ${e.action === 'skill_run' ? 'badge-success' : e.action === 'brain_update' ? 'badge-info' : e.action === 'backup_created' ? 'badge-accent' : 'badge-warning'}">${escapeHtml(e.action)}</span></td>
               <td style="font-size:13px">${e.skill ? `<strong>${escapeHtml(e.skill)}</strong>` : ''}${e.file ? `File: ${escapeHtml(e.file)}` : ''}${e.job ? `Job: ${escapeHtml(e.job)}` : ''}${e.plugin ? `Plugin: ${escapeHtml(e.plugin)}` : ''}</td>
               <td style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono)">${e.id || ''}</td>
             </tr>

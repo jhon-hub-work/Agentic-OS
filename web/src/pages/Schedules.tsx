@@ -38,7 +38,8 @@ export default function Schedules() {
 
 function JobCard({ job, last }: { job: Job; last?: { output?: string; timestamp: string } }) {
   const [busy, setBusy] = useState(false)
-  const act = async (fn: () => Promise<unknown>) => { setBusy(true); try { await fn() } finally { setBusy(false) } }
+  const [err, setErr] = useState('')
+  const act = async (fn: () => Promise<unknown>) => { setBusy(true); setErr(''); try { await fn() } catch (x) { setErr((x as Error).message) } finally { setBusy(false) } }
   const kind = job.kind ?? 'skill'
   return (
     <Panel inner="flex flex-col gap-4">
@@ -47,7 +48,7 @@ function JobCard({ job, last }: { job: Job; last?: { output?: string; timestamp:
           {kind !== 'skill' && job.agent && <AgentLogo name={job.agent} size={36} />}
           <div>
             <p className="text-[15px] font-medium text-ink">{job.name}</p>
-            <p className="text-sm text-ink-3">{kind === 'skill' ? `Skill: ${job.skill}` : `${kind === 'team' ? 'Team run from' : ''} ${AGENT_META[job.agent]?.label ?? job.agent}`} · {describe(job.cron)}</p>
+            <p className="text-sm text-ink-3">{kind === 'skill' ? `Skill: ${job.skill}` : `${kind === 'team' ? 'Team run from' : ''} ${AGENT_META[job.agent]?.label ?? job.agent}`}, {describe(job.cron)}</p>
           </div>
         </div>
         <label className="relative inline-flex min-h-11 cursor-pointer items-center" title={job.enabled ? 'On' : 'Off'}>
@@ -68,6 +69,7 @@ function JobCard({ job, last }: { job: Job; last?: { output?: string; timestamp:
         <button onClick={() => act(() => api.runJob(job.id))} disabled={busy} className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:opacity-50"><Play size={14} aria-hidden="true" /> Run now</button>
         <button onClick={() => { if (confirm(`Delete "${job.name}"?`)) act(() => api.deleteJob(job.id)) }} disabled={busy} className="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full px-4 text-sm text-bad hover:bg-white/60"><Trash size={14} aria-hidden="true" /> Delete</button>
       </div>
+      {err && <p role="alert" className="text-sm text-bad">{err}</p>}
     </Panel>
   )
 }

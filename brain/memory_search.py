@@ -71,6 +71,8 @@ def search(query: str, limit: int = 20) -> list:
     conn = _get_db()
     if not query.strip():
         return []
+    # Each word as an FTS5 string: raw "job-search", "c++" or "it?" were syntax errors that returned nothing.
+    query = " ".join('"' + t.replace('"', '""') + '"' for t in query.split())
     try:
         rows = conn.execute(
             "SELECT m.id, m.source, m.path, m.title, m.category, m.created, "

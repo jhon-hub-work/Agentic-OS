@@ -10,14 +10,20 @@ export type ChatMsg = { id: string; role: 'user' | 'assistant'; agent: AgentName
 export type ToolStep = { tool: string; toolCallId: string; label?: string; emoji?: string; status: 'running' | 'completed' | string }
 export type ChatContext = { used: number; window: number | null }
 export type StreamEvent = ({ type: 'context' } & ChatContext) | { type: 'text'; text: string } | ({ type: 'tool' } & ToolStep) | { type: 'error'; error: string } | { type: 'cleared' } | { type: 'done'; message: ChatMsg }
-export type SessionMsg = { role: 'user' | 'agent'; agent: AgentName | null; round: number; content: string; timestamp: string; prompt_tokens?: number }
-export type Session = { id: string; title: string; agents: AgentName[]; rounds: number; round: number; status: 'running' | 'idle'; working: AgentName[]; messages: SessionMsg[]; created: string; pinned?: boolean; read?: boolean; section?: string; archived?: boolean }
-export type Job = { id: string; name: string; kind: 'agent' | 'team' | 'skill'; agent: AgentName; prompt: string; skill?: string | null; cron: string; enabled: boolean; last_run: string | null; description?: string }
+export type SessionMsg = { role: 'user' | 'agent' | 'verdict'; agent: AgentName | null; round: number; content: string; timestamp: string; prompt_tokens?: number }
+export type Session = { id: string; title: string; agents: AgentName[]; rounds: number; round: number; status: 'running' | 'idle'; working: AgentName[]; judging?: boolean; messages: SessionMsg[]; created: string; pinned?: boolean; read?: boolean; section?: string; archived?: boolean; overrides?: Record<AgentName, ModelChoice> }
+/** One agent's model + effort; "" or missing = its default. */
+export type ModelChoice = { model?: string; effort?: string }
+/** models: its list ([] = type a name, null = no model choice); default: what "Default" runs when nothing is set. */
+export type ModelInfo = { models: string[] | null; efforts: string[]; current: string; current_effort: string; default: string }
+/** A session as the list sends it (?light=1): no messages, just how many and the last one. */
+export type SessionItem = Omit<Session, 'messages'> & { message_count: number; last: SessionMsg | null }
+export type Job ={ id: string; name: string; kind: 'agent' | 'team' | 'skill'; agent: AgentName; prompt: string; skill?: string | null; cron: string; enabled: boolean; last_run: string | null; description?: string }
 export type JobEvent = { type: string; job_id?: string; name?: string; output?: string; trigger?: string; timestamp: string }
 
 export type JobPost = { id: string; title: string; company: string; url: string; source: string; pay?: string; score?: number; reason?: string; lane: string; status: 'new' | 'queued' | 'drafted' | 'draft_blocked' | 'needs_you' | 'approved' | 'applying' | 'handoff' | 'closed' | 'skipped' | 'applied' | 'replied'; draft: string; applied_at?: string; follow_up?: 'due' | 'done'; followup_draft?: string; followup_problem?: string; problem?: string; apply_result?: string; needs_why?: string; found: string }
 export type Plugin = { id: string; name: string; description: string; enabled: boolean; skills: boolean; mcp: Record<string, unknown> }
-export type LabRun = { id: string; request: string; rounds: number; status: 'running' | 'passed' | 'failed' | 'blocked' | 'error'; name: string; source: string; scores: number[]; created: string; installed_to?: string; messages: { at: string; who: 'you' | 'lab'; text: string }[] }
+export type LabRun = { id: string; request: string; rounds: number; status: 'running' | 'passed' | 'failed' | 'blocked' | 'error'; name: string; source: string; scores: number[]; created: string; installed_to?: string; blocked_by?: string; override?: boolean; messages: { at: string; who: 'you' | 'lab'; text: string }[] }
 export type TicketSeverity = 'P1' | 'P2' | 'P3' | 'P4'
 export type TicketCategory = 'incident' | 'bug' | 'request' | 'change'
 export type TicketStatus = 'new' | 'planning' | 'awaiting_approval' | 'approved' | 'in_progress' | 'waiting_on_you' | 'resolved' | 'closed'
@@ -41,11 +47,11 @@ export const api = {
   runSkill: (name: string, input: string, agent = 'auto') =>
     req<{ output: string; agent: string }>(`/api/skills/${encodeURIComponent(name)}/run`, { method: 'POST', body: JSON.stringify({ input, agent }) }),
   chatHistory: (agent: AgentName) => req<{ messages: ChatMsg[] }>(`/api/chat/history?agent=${agent}&limit=100`),
-  chat: (agent: AgentName, message: string) => req<{ response: ChatMsg }>('/api/chat', { method: 'POST', body: JSON.stringify({ agent, message }) }),
+  chat: (agent: AgentName, message: string, pick: ModelChoice = {}) => req<{ response: ChatMsg }>('/api/chat', { method: 'POST', body: JSON.stringify({ agent, message, ...pick }) }),
   chatMeta: (agent: AgentName) => req<{ context: ChatContext | null; commands: string[]; live: boolean }>(`/api/chat/meta?agent=${agent}`),
   // Live reply: words and tool steps arrive as server-sent events (Hermes and Claude Code)
-  chatStream: async (agent: AgentName, message: string, on: (e: StreamEvent) => void) => {
-    const r = await fetch('/api/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent, message }) })
+  chatStream: async (agent: AgentName, message: string, on: (e: StreamEvent) => void, pick: ModelChoice = {}) => {
+    const r = await fetch('/api/chat/stream', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent, message, ...pick }) })
     if (!r.ok || !r.body) throw new Error((await r.json().catch(() => ({}))).detail || `Request failed (${r.status})`)
     const reader = r.body.pipeThrough(new TextDecoderStream()).getReader()
     let buf = ''
@@ -60,10 +66,11 @@ export const api = {
       }
     }
   },
-  sessions: () => req<{ sessions: Session[] }>('/api/sessions'),
-  startSession: (message: string, agents: AgentName[], rounds: number) =>
-    req<Session>('/api/sessions', { method: 'POST', body: JSON.stringify({ message, agents, rounds }) }),
-  patchSession: (id: string, p: Partial<Pick<Session, 'title' | 'pinned' | 'read' | 'section' | 'archived'>>) =>
+  sessions: () => req<{ sessions: SessionItem[] }>('/api/sessions?light=1&limit=200'),
+  session: (id: string) => req<Session>(`/api/sessions/${id}`),
+  startSession: (message: string, agents: AgentName[], rounds: number, overrides: Record<AgentName, ModelChoice> = {}) =>
+    req<Session>('/api/sessions', { method: 'POST', body: JSON.stringify({ message, agents, rounds, overrides }) }),
+  patchSession: (id: string, p: Partial<Pick<Session, 'title' | 'pinned' | 'read' | 'section' | 'archived' | 'overrides'>>) =>
     req<Session>(`/api/sessions/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
   forkSession: (id: string) => req<Session>(`/api/sessions/${id}/fork`, { method: 'POST' }),
   deleteSession: (id: string) => req<{ deleted: string }>(`/api/sessions/${id}`, { method: 'DELETE' }),
@@ -79,9 +86,10 @@ export const api = {
   connections: () => req<Record<AgentName, { ok: boolean; text: string }>>('/api/connections'),
   addConnection: (c: { name: string; url: string; command: string; agents: AgentName[] }) =>
     req<Record<string, { ok: boolean; text: string }>>('/api/connections', { method: 'POST', body: JSON.stringify(c) }),
-  models: (agent: 'claude' | 'opencode') => req<{ models: string[]; current: string }>(`/api/models/${agent}`),
-  settings: () => req<{ models?: Record<string, string> }>('/api/settings'),
-  saveModels: (models: Record<string, string>) => req<unknown>('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { models } }) }),
+  models: (agent: AgentName) => req<ModelInfo>(`/api/models/${agent}`),
+  settings: () => req<{ models?: Record<string, string>; efforts?: Record<string, string> }>('/api/settings'),
+  saveModels: (models: Record<string, string>, efforts: Record<string, string>) =>
+    req<unknown>('/api/settings', { method: 'PUT', body: JSON.stringify({ settings: { models, efforts } }) }),
   jobPeople: () => req<{ id: string; name: string; summary?: string }[]>('/api/jobs/people'),
   jobsBoard: (who = '') => req<{ jobs: JobPost[]; runs: JobRun[]; running: boolean }>(`/api/jobs?who=${who}`),
   runJobSearch: (who = '') => req<unknown>(`/api/jobs/run?who=${who}`, { method: 'POST' }),
@@ -93,7 +101,8 @@ export const api = {
     req<{ results: Record<string, { ok: boolean; text: string }>; skills_synced: string[] }>(`/api/claude-plugins/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   skillLab: () => req<{ runs: LabRun[]; pass: number }>('/api/skill-lab'),
   startSkillLab: (message: string, rounds: number) => req<LabRun>('/api/skill-lab', { method: 'POST', body: JSON.stringify({ message, rounds }) }),
-  addAgent: (a: { id: string; label: string; role: string; command: string; timeout: number; relogin: string }) =>
+  installAnyway: (id: string) => req<{ started: boolean }>(`/api/skill-lab/${id}/install-anyway`, { method: 'POST' }),
+  addAgent: (a: { id: string; label: string; role: string; command: string; timeout: number; relogin: string; model_args: string; effort_args: string }) =>
     req<CustomAgent & { test_answer: string }>('/api/agents', { method: 'POST', body: JSON.stringify(a) }),
   findAgentLogo: (id: string) => req<{ logo: string }>(`/api/agents/${id}/logo/find`, { method: 'POST' }),
   removeAgent: (id: string) => req<unknown>(`/api/agents/${id}`, { method: 'DELETE' }),

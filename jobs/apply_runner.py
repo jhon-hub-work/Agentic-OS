@@ -8,12 +8,15 @@ stops and hands the tab to the owner on anything only they can answer. Form answ
 subscription (Hoot's own answerer used OpenCode Go, which is gone).
 """
 
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -27,20 +30,43 @@ ATS = re.compile(r"https?://(?:boards|job-boards)\.greenhouse\.io/[^\s\"'<>]+|ht
                  r"|https?://jobs\.ashbyhq\.com/[^\s\"'<>]+")
 
 
-def ats_url(url: str) -> str:
+def _public_http(url: str) -> bool:
+    """http(s) to a host that resolves only to public addresses (no file:, localhost or LAN)."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return False
+    try:
+        addrs = {a[4][0] for a in socket.getaddrinfo(u.hostname, None)}
+    except OSError:
+        return False
+    # shortcut: redirects aren't re-checked; upgrade to a redirect handler if postings ever bounce to local hosts
+    return all(ipaddress.ip_address(a.split("%")[0]).is_global for a in addrs)
+
+
+def _slug_matches(link: str, company: str) -> bool:
+    """The ATS link's company slug (first path part) belongs to this job's company."""
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    slug, name = norm(urllib.parse.urlsplit(link).path.strip("/").split("/")[0]), norm(company)
+    return bool(slug and name) and (slug in name or name in slug)
+
+
+def ats_url(url: str, company: str = "") -> str:
     """The posting's own Greenhouse/Lever/Ashby form, or ''. Boards like Himalayas link out to it."""
     if ATS.match(url):
         return url
     # end-to-end test only: a local copy of a form, never set in normal use
     if os.environ.get("APPLY_ALLOW_LOCAL") == "1" and url.startswith("file:") and "greenhouse.io" in url:
         return url
+    if not _public_http(url):
+        return ""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (personal job search)"})
         html = urllib.request.urlopen(req, timeout=30).read().decode("utf-8", "replace")
-    except OSError:
+    except (OSError, ValueError):
         return ""
-    m = ATS.search(html.replace("\\/", "/"))
-    return m.group(0).rstrip(".,);") if m else ""
+    # A posting page can link other companies' openings too: only this company's form counts.
+    links = (m.group(0).rstrip(".,);") for m in ATS.finditer(html.replace("\\/", "/")))
+    return next((link for link in links if _slug_matches(link, company)), "")
 
 
 def claude_json(system: str, user: str) -> dict:
@@ -71,7 +97,7 @@ def main(path: str) -> dict:
         # Reddit [Hiring] post: same as OnlineJobs, a DM from the owner's account (signed in in Hoot's Brave).
         import reddit_dm
         return reddit_dm.send(job, followup=job.get("mode") == "followup")
-    form = ats_url(job["url"])
+    form = ats_url(job["url"], job.get("company") or "")
     if not form:
         return {"outcome": "handoff", "reason": "this site isn't a form the OS can fill (no Greenhouse/Lever/Ashby link); apply on the site"}
 
@@ -95,11 +121,19 @@ def main(path: str) -> dict:
     return res
 
 
+def _selftest():
+    assert ATS.match("https://jobs.lever.co/acme/123") and ATS.match("https://boards.greenhouse.io/acme/jobs/9")
+    assert not ATS.match("https://himalayas.app/companies/x/jobs/y")
+    assert _slug_matches("https://boards.greenhouse.io/acme/jobs/9", "Acme Inc.")
+    assert not _slug_matches("https://jobs.lever.co/othercorp/1", "Acme") and not _slug_matches("https://jobs.lever.co/acme/1", "")
+    assert not _public_http("file:///C:/x.html") and not _public_http("http://127.0.0.1:8810/") and not _public_http("http://localhost/")
+    assert ats_url("http://192.168.1.1/job", "Acme") == ""
+    print("apply_runner selftest ok")
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--selftest"]:
-        assert ATS.match("https://jobs.lever.co/acme/123") and ATS.match("https://boards.greenhouse.io/acme/jobs/9")
-        assert not ATS.match("https://himalayas.app/companies/x/jobs/y")
-        print("apply_runner selftest ok")
+        _selftest()
     else:
         try:
             print(json.dumps(main(sys.argv[1])))

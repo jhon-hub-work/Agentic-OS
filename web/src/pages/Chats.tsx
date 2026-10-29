@@ -1,8 +1,8 @@
 import { PaperPlaneRight, Plus } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
-import { AGENT_META, api, fmtTokens, timeAgo, type AgentName, type ChatContext, type ChatMsg, type Skill, type ToolStep } from '../api'
-import { AgentLogo, AgentPicker, ChromeButton, Empty, PageHead, Panel, Prose, inputCls, spring } from '../ui'
+import { AGENT_META, api, fmtTokens, timeAgo, type AgentName, type ChatContext, type ChatMsg, type ModelChoice, type Skill, type ToolStep } from '../api'
+import { AgentLogo, AgentPicker, ChromeButton, Empty, ModelPick, PageHead, Panel, Prose, inputCls, spring, useModelInfo } from '../ui'
 
 export default function Chats() {
   const [agent, setAgent] = useState<AgentName>('claude')
@@ -12,6 +12,8 @@ export default function Chats() {
   const [error, setError] = useState<string | null>(null)
   const [live, setLive] = useState<{ text: string; steps: ToolStep[] } | null>(null)
   const end = useRef<HTMLDivElement>(null)
+  const info = useModelInfo(agent)
+  const [pick, setPick] = useState<ModelChoice>({})  // this chat's model + effort; {} = the agent's default
   const [skills, setSkills] = useState<Skill[]>([])
   useEffect(() => { api.skills().then(setSkills).catch(() => {}) }, [])
   const [meta, setMeta] = useState<{ context: ChatContext | null; commands: string[]; live: boolean }>({ context: null, commands: [], live: false })
@@ -24,9 +26,11 @@ export default function Chats() {
   const matches = slash ? menu.filter(c => c.name.startsWith(q) || c.name.split(':')[1]?.startsWith(q)).slice(0, 8) : []
 
   useEffect(() => {
-    setMsgs(null); setMeta({ context: null, commands: [], live: false })
-    api.chatHistory(agent).then(r => setMsgs(r.messages)).catch(e => setError(e.message))
-    api.chatMeta(agent).then(setMeta).catch(() => {})
+    let alive = true  // a slow answer for the agent picked before must not show in this one's thread
+    setMsgs(null); setMeta({ context: null, commands: [], live: false }); setPick({})
+    api.chatHistory(agent).then(r => alive && setMsgs(r.messages)).catch(e => alive && setError(e.message))
+    api.chatMeta(agent).then(r => alive && setMeta(r)).catch(() => {})
+    return () => { alive = false }
   }, [agent])
   useEffect(() => { end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }, [msgs, busy, live])
 
@@ -52,10 +56,10 @@ export default function Chats() {
           else if (e.type === 'text') setLive(l => l && { ...l, text: l.text + e.text })
           else if (e.type === 'tool') setLive(l => l && { ...l, steps: [...l.steps.filter(s => s.toolCallId !== e.toolCallId), { ...l.steps.find(s => s.toolCallId === e.toolCallId), ...e }] })
           else if (e.type === 'done') setMsgs(prev => [...(prev ?? []), e.message])
-        })
+        }, pick)
         if (agent === 'claude') api.chatMeta(agent).then(r => setMeta(x => ({ ...x, commands: r.commands }))).catch(() => {})
       } else {
-        const r = await api.chat(agent, m)
+        const r = await api.chat(agent, m, pick)
         setMsgs(prev => [...(prev ?? []), r.response])
       }
     } catch (err) { setError((err as Error).message) }
@@ -65,7 +69,15 @@ export default function Chats() {
   return (
     <>
       <PageHead eyebrow="Chats" title="Talk to one agent" sub="A private thread with each agent. Claude Code and Hermes show their steps live and remember the whole chat." />
-      <Panel className="mb-5"><AgentPicker legend="Agent" value={[agent]} onChange={v => v[0] && setAgent(v[0])} /></Panel>
+      <Panel className="mb-5" inner="flex flex-col gap-4">
+        <AgentPicker legend="Agent" value={[agent]} disabled={busy} onChange={v => v[0] && setAgent(v[0])} />
+        {info && (info.models !== null || info.efforts.length > 0) && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-ink-2">Model for this chat</span>
+            <ModelPick agent={agent} info={info} value={pick} onChange={setPick} disabled={busy} base={{ model: info.current, effort: info.current_effort }} />
+          </div>
+        )}
+      </Panel>
       <Panel inner="flex min-h-[55dvh] flex-col">
         {meta.live && (
           <div className="mb-3 flex items-center gap-3 border-b border-white/80 pb-3">
@@ -76,10 +88,10 @@ export default function Chats() {
                   <div className={`h-full rounded-full ${meta.context.used / meta.context.window > 0.8 ? 'bg-bad' : 'bg-navy'}`}
                     style={{ width: `${Math.max(1, Math.min(100, (meta.context.used / meta.context.window) * 100))}%` }} />
                 </div>
-                <span className="font-mono text-[11px] text-ink-3">{fmtTokens(meta.context.used)} / {fmtTokens(meta.context.window)} context · {Math.round((meta.context.used / meta.context.window) * 100)}%</span>
+                <span className="font-mono text-[11px] text-ink-3">{fmtTokens(meta.context.used)} / {fmtTokens(meta.context.window)} context, {Math.round((meta.context.used / meta.context.window) * 100)}%</span>
               </>
             ) : (
-              <span className="flex-1 font-mono text-[11px] text-ink-3">{meta.context ? `~${fmtTokens(meta.context.used)} tokens last turn` : 'Fresh chat · no context used yet'}</span>
+              <span className="flex-1 font-mono text-[11px] text-ink-3">{meta.context ? `~${fmtTokens(meta.context.used)} tokens last turn` : 'Fresh chat, no context used yet'}</span>
             )}
             <button type="button" disabled={busy} onClick={() => run('/clear')}
               className="flex cursor-pointer items-center gap-1.5 rounded-xl border border-white bg-white/60 px-3 py-1.5 text-xs text-ink hover:bg-white disabled:opacity-50">
@@ -98,7 +110,7 @@ export default function Chats() {
                   {m.role !== 'user' && <AgentLogo name={m.agent} size={30} />}
                   <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${m.role === 'user' ? 'chrome' : 'border border-white bg-white/65'}`}>
                     {m.role === 'user' ? <p className="whitespace-pre-wrap text-sm leading-relaxed">{m.content}</p> : <Prose text={m.content} />}
-                    <p className={`mt-1.5 font-mono text-[11px] ${m.role === 'user' ? 'text-[#F4FAFF]/60' : 'text-ink-3'}`}>{timeAgo(m.timestamp)}</p>
+                    <p className={`mt-1.5 font-mono text-[11px] ${m.role === 'user' ? 'text-on-chrome/60' : 'text-ink-3'}`}>{timeAgo(m.timestamp)}</p>
                   </div>
                 </motion.div>
               ))}

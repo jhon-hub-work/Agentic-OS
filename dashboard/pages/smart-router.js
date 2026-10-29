@@ -58,10 +58,10 @@ async function suggestRouter() {
         <div class="router-suggestion" style="border:none;padding:0;background:none">
           <div>
             <div class="router-suggestion-agent" style="font-size:18px">
-              ${agentIcons[data.suggested_agent] || '🤖'} ${data.suggested_agent}
+              ${agentIcons[data.suggested_agent] || '🤖'} ${escapeHtml(data.suggested_agent)}
             </div>
             <div style="font-size:12px;color:var(--text-secondary);margin-top:4px">
-              Confidence: <span style="color:${confidenceColors[data.confidence] || 'var(--text-muted)'}">${data.confidence}</span>
+              Confidence: <span style="color:${confidenceColors[data.confidence] || 'var(--text-muted)'}">${escapeHtml(data.confidence)}</span>
               ${data.confidence === 'high' ? '✅' : data.confidence === 'medium' ? '⚠️' : '❓'}
             </div>
           </div>
@@ -72,7 +72,7 @@ async function suggestRouter() {
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
           ${Object.entries(data.scores || {}).map(([agent, score]) => `
             <span class="badge ${score > 0 ? 'badge-success' : 'badge-info'}">
-              ${agentIcons[agent] || '🤖'} ${agent}: ${score}
+              ${agentIcons[agent] || '🤖'} ${escapeHtml(agent)}: ${escapeHtml(String(score))}
             </span>
           `).join('')}
         </div>
@@ -106,7 +106,7 @@ async function routeTask() {
           <span style="font-size:24px">✅</span>
           <div>
             <div style="font-weight:600">Task Routed</div>
-            <div class="text-muted text-sm">${data.message}</div>
+            <div class="text-muted text-sm">${escapeHtml(data.message)}</div>
           </div>
         </div>
       </div>

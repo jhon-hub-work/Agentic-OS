@@ -57,6 +57,8 @@ def _text(s: str) -> str:
 
 
 def _fresh(when) -> bool:
+    if when is not None and when.tzinfo is None:  # "-0000" RSS dates parse naive; comparing them raised TypeError
+        when = when.replace(tzinfo=timezone.utc)
     return when is None or when >= datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS)
 
 
@@ -210,6 +212,7 @@ def _selftest():
     assert HIRING.search("[Hiring] Video Editor") and not HIRING.search("[For Hire] Video Editor")
     o = _offer("x", "https://u", "Co", "Video Editor", "", "jd")
     assert o["card_only"] and o["location"] == "Remote"
+    assert _fresh(parsedate_to_datetime(datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S -0000")))
     assert _text("<p>a&amp;b</p><br>c") == "a&b\n\nc" or "a&b" in _text("<p>a&amp;b</p>")
     print("sources selftest ok")
 

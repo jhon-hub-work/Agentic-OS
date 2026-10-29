@@ -67,10 +67,10 @@ async function refreshAgentHealth() {
           ${agentIcons[a.name] || '🤖'}
         </div>
         <div class="agent-health-info">
-          <div class="agent-health-name" style="text-transform:capitalize">${a.name}</div>
+          <div class="agent-health-name" style="text-transform:capitalize">${escapeHtml(a.name)}</div>
           <div class="agent-health-status">
             <span class="agent-dot ${a.status === 'online' ? 'online' : a.status === 'warning' ? 'warning' : 'offline'}"></span>
-            <span style="text-transform:capitalize;color:var(--text-secondary)">${a.status}</span>
+            <span style="text-transform:capitalize;color:var(--text-secondary)">${escapeHtml(a.status)}</span>
           </div>
           <div class="agent-health-stats">
             <div class="agent-health-stat">

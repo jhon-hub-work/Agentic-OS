@@ -27,9 +27,9 @@ async function renderScheduler() {
           <tbody>
             ${jobs.map(j => `
               <tr>
-                <td><strong>${j.name}</strong></td>
-                <td><span class="badge badge-accent">${j.skill}</span></td>
-                <td><code>${j.cron}</code></td>
+                <td><strong>${escapeHtml(j.name)}</strong></td>
+                <td><span class="badge badge-accent">${escapeHtml(j.skill)}</span></td>
+                <td><code>${escapeHtml(j.cron)}</code></td>
                 <td><span class="badge ${j.enabled ? 'badge-success' : 'badge-warning'}">${j.enabled ? 'Active' : 'Paused'}</span></td>
                 <td style="font-size:12px;color:var(--text-muted)">${j.last_run ? formatDate(j.last_run) : 'Never'}</td>
                 <td><button class="btn btn-sm btn-danger" onclick="deleteJob('${j.id}')">Delete</button></td>
@@ -58,7 +58,7 @@ async function showAddJob() {
       <label class="form-label">Skill</label>
       <select id="jobSkill" class="form-select">
         <option value="">Select a skill...</option>
-        ${skills.map(s => `<option value="${s.name}">${s.name.replace(/-/g, ' ')}</option>`).join('')}
+        ${skills.map(s => `<option value="${s.name}">${escapeHtml(s.name.replace(/-/g, ' '))}</option>`).join('')}
       </select>
     </div>
     <div class="form-group">

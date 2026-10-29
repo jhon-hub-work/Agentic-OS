@@ -134,6 +134,12 @@ function SkillLab() {
             {r.scores.length > 0 && <Scores scores={r.scores} pass={data?.pass ?? 85} rounds={r.rounds} />}
             <p className={`self-start text-xs ${r.status === 'passed' ? 'text-ok' : r.status === 'running' ? 'text-ink-3' : 'text-bad'}`}>
               {r.name || 'skill'}: {LAB_STATUS[r.status]}{r.installed_to ? ' and installed' : ''}</p>
+            {!busy && (r.status === 'blocked' && (r.blocked_by === 'scanner' || r.messages[r.messages.length - 1]?.text.startsWith('**Blocked by the scanner**')) || r.status === 'error' && r.override) && (
+              <button type="button" onClick={() => api.installAnyway(r.id).then(reload, x => setErr((x as Error).message))}
+                className="min-h-10 self-start rounded-full border border-steel/80 bg-white/70 px-4 text-sm text-ink transition-colors duration-200 hover:bg-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy">
+                Install anyway (the safety read and tests still decide)
+              </button>
+            )}
           </div>
         ))}
         <div ref={end} />
@@ -165,7 +171,7 @@ function Scores({ scores, pass, rounds }: { scores: number[]; pass: number; roun
             style={{ height: `${Math.max(scores[i] ?? 4, 4)}%` }} />
         ))}
       </div>
-      <p className="mt-1 text-[11px] text-ink-3">Rounds · dashed line = {pass}% pass</p>
+      <p className="mt-1 text-[11px] text-ink-3">Rounds; the dashed line is the {pass}% pass mark</p>
     </div>
   )
 }

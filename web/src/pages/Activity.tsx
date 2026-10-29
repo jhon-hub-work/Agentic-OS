@@ -14,7 +14,7 @@ export default function Activity() {
             {rows.map((e, i) => (
               <li key={e.id ?? i} className="flex flex-col gap-1 py-3 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-ink">{e.action.replace(/_/g, ' ')}{e.agent ? ` · ${e.agent}` : ''}{e.skill ? ` · ${e.skill}` : ''}</p>
+                  <p className="text-sm font-medium text-ink">{e.action.replace(/_/g, ' ')}{e.agent ? `, ${e.agent}` : ''}{e.skill ? `, ${e.skill}` : ''}</p>
                   {(e.msg_preview || e.output_preview) && <p className="truncate text-sm text-ink-3">{e.msg_preview || e.output_preview}</p>}
                 </div>
                 <span className="shrink-0 font-mono text-xs text-ink-3">{timeAgo(e.timestamp)}</span>

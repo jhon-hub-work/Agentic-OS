@@ -56,7 +56,7 @@ export default function Tickets() {
                   <span className="ml-auto"><Due t={x} /></span>
                 </span>
                 <span className="truncate text-[15px] font-medium text-ink">{x.title}</span>
-                <span className="text-xs text-ink-2">{STATUS_LABEL[x.status]} · {x.category}</span>
+                <span className="text-xs text-ink-2">{STATUS_LABEL[x.status]}, {x.category}</span>
               </button>
             ))}
           </div>
@@ -72,14 +72,23 @@ function NewTicket({ sla, onDone }: { sla?: Record<TicketSeverity, [number, numb
   const [err, setErr] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [files, setFiles] = useState<File[]>([])
+  const [tid, setTid] = useState<string | null>(null)  // set once the ticket exists, so a retry after a failed upload doesn't open a second one
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value })
   async function submit(e: React.FormEvent) {
-    e.preventDefault(); setBusy(true); setErr(null)
+    e.preventDefault(); setErr(null)
+    const bad = files.find(x => !x.size || x.size > 10 * 1024 * 1024)
+    if (bad) { setErr(`${bad.name} is empty or over 10 MB. Remove it first.`); return }
+    if (files.length > 10) { setErr('Up to 10 files per ticket.'); return }
+    setBusy(true)
+    let id = tid
     try {
-      const t = await api.createTicket(f)
-      for (const file of files) await api.attachTicketFile(t.id, file)
-      onDone(t.id)
-    } catch (x) { setErr((x as Error).message) } finally { setBusy(false) }
+      if (!id) { id = (await api.createTicket(f)).id; setTid(id) }
+      let left = files
+      for (const file of files) { await api.attachTicketFile(id, file); left = left.slice(1); setFiles(left) }  // uploaded ones leave the list
+      onDone(id)
+    } catch (x) {
+      setErr(id ? `Ticket ${id} is open, but a file didn't upload: ${(x as Error).message}. Press Open again to send the files still listed.` : (x as Error).message)
+    } finally { setBusy(false) }
   }
   const s = sla?.[f.severity]
   return (
@@ -116,13 +125,13 @@ function Detail({ t, reload }: { t: Ticket; reload: () => void }) {
       <div className="flex flex-wrap items-center gap-2">
         <span className={`rounded-full border px-2 font-mono text-xs ${SEV_CLS[t.severity]}`}>{t.severity}</span>
         <span className="font-mono text-sm text-ink-3">{t.id}</span>
-        <span className="text-sm text-ink-2">{STATUS_LABEL[t.status]} · {t.category}</span>
+        <span className="text-sm text-ink-2">{STATUS_LABEL[t.status]}, {t.category}</span>
         <span className="ml-auto"><Due t={t} /></span>
       </div>
       <h2 className="text-xl font-medium text-ink">{t.title}</h2>
       {t.description && <p className="whitespace-pre-wrap text-sm text-ink-2">{t.description}</p>}
       <Attachments t={t} reload={reload} />
-      <p className="text-xs text-ink-3 [overflow-wrap:anywhere]">Folder: {t.project} · opened {timeAgo(t.created)}</p>
+      <p className="text-xs text-ink-3 [overflow-wrap:anywhere]">Folder: {t.project}, opened {timeAgo(t.created)}</p>
       {(t.status === 'planning' || t.status === 'in_progress') && <p className="text-sm text-ink-2">Claude is working on it now…</p>}
       {t.plan && (
         <details open={waiting} className="rounded-2xl border border-white bg-white/55 p-4">
@@ -155,7 +164,7 @@ function Detail({ t, reload }: { t: Ticket; reload: () => void }) {
         <p className="mb-2 text-sm font-medium text-ink">Activity</p>
         <ol className="flex flex-col gap-2">
           {[...t.log].reverse().map((l, i) => (
-            <li key={i} className="text-sm"><span className="text-ink-3">{timeAgo(l.at)} · {l.who}:</span> <span className="whitespace-pre-wrap text-ink-2">{l.text}</span></li>
+            <li key={i} className="text-sm"><span className="text-ink-3">{timeAgo(l.at)}, {l.who}:</span> <span className="whitespace-pre-wrap text-ink-2">{l.text}</span></li>
           ))}
         </ol>
       </div>

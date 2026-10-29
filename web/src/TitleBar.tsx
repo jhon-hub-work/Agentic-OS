@@ -17,7 +17,7 @@ export default function TitleBar() {
         <div className="flex opacity-0 transition-opacity duration-200 group-hover:opacity-100 focus-within:opacity-100">
           <button onClick={() => win.minimize()} aria-label="Minimize" className={btn}><Minus size={14} /></button>
           <button onClick={() => win.toggleMaximize()} aria-label="Maximize" className={btn}><Square size={12} /></button>
-          <button onClick={() => win.close()} aria-label="Close" className={`${btn} hover:!bg-[#C42B1C] hover:!text-white`}><X size={14} /></button>
+          <button onClick={() => win.close()} aria-label="Close" className={`${btn} hover:!bg-win-close hover:!text-white`}><X size={14} /></button>
         </div>
       </div>
     </>

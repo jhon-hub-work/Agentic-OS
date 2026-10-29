@@ -58,8 +58,8 @@ async function renderGoals() {
     list.innerHTML = goals.map(g => `
       <div class="goal-card">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-          <span class="badge badge-${g.status === 'completed' ? 'success' : g.status === 'active' ? 'info' : 'warning'}">${g.status}</span>
-          <span class="badge badge-accent">${g.category}</span>
+          <span class="badge badge-${g.status === 'completed' ? 'success' : g.status === 'active' ? 'info' : 'warning'}">${escapeHtml(g.status)}</span>
+          <span class="badge badge-accent">${escapeHtml(g.category)}</span>
           ${g.target_date ? `<span class="text-muted text-xs">🎯 ${g.target_date}</span>` : ''}
         </div>
         <div class="goal-card-title">${escapeHtml(g.title)}</div>

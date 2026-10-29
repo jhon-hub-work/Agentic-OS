@@ -8,13 +8,19 @@
   --color-ice: #E6EEF4;
   --color-ink: #1D2B3A;
   --color-ink-2: #4E6072;
-  --color-ink-3: #7C8B99;
+  --color-ink-3: #5E6D7B;  /* 4.5:1 on the glass (was #7C8B99, 3.3:1: hints were hard to read) */
   --color-navy: #1F2D44;
   --color-navy-deep: #0E1726;
   --color-steel: #5B6F86;
   --color-ok: #2E7D62;
   --color-warn: #A0661B;
   --color-bad: #B23A3A;
+  --color-tile: #FFFFFF;      /* agent logo tiles: white in both themes */
+  --color-tile-ink: #1D2B3A;
+  --color-glacier: #3FB6EC;   /* the wave's bright blue */
+  --color-on-chrome: #F4FAFF; /* text on navy chrome */
+  --color-night: #0A111C;     /* the night theme's ground, for the switch */
+  --color-win-close: #C42B1C; /* Windows close-button red */
 
   --ease-glide: cubic-bezier(0.32, 0.72, 0, 1);
 }
@@ -95,10 +101,7 @@ body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antiali
   color: #EEF4F9;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3), 0 10px 24px -12px rgba(14, 23, 38, 0.55);
 }
-.chrome-text {
-  background: linear-gradient(120deg, #5B6F86, #1F2D44 60%);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-}
+.chrome-text { color: var(--color-navy); }
 
 .prose-glacier > * + * { margin-top: 0.6em; }
 .prose-glacier h1, .prose-glacier h2, .prose-glacier h3 { font-size: 0.95rem; font-weight: 500; margin-top: 1em; }
@@ -145,14 +148,13 @@ body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antiali
   color: #F4FAFF;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 10px 24px -12px rgba(63, 182, 236, 0.45);
 }
-:root.dark .chrome-text { background: linear-gradient(120deg, #9FDDF7, #3FB6EC 60%); -webkit-background-clip: text; background-clip: text; }
 :root.dark .prose-glacier code { background: rgba(255, 255, 255, 0.08); }
 :root.dark .prose-glacier pre { background: #050A12; }
 :root.dark .prose-glacier th, :root.dark .prose-glacier td { border-bottom-color: rgba(255, 255, 255, 0.08); }
 :root.dark .shimmer { background-image: linear-gradient(90deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.03) 100%); }
 /* the theme switch: a black hole in light mode, a captured star in dark mode */
 .black-hole { width: 44px; height: 44px; border: 0; border-radius: 50%; cursor: pointer; background: none; padding: 0; }
-.black-hole:focus-visible { outline: 2px solid #3FB6EC; outline-offset: 4px; }
+.black-hole:focus-visible { outline: 2px solid var(--color-navy); outline-offset: 4px; }
 .black-hole .bh-core { position: absolute; inset: 11px; border-radius: 50%; background: #000; box-shadow: 0 0 0 2px rgba(255,255,255,.08), 0 0 16px 3px rgba(0,0,0,.35); transition: background .5s, box-shadow .5s; }
 .black-hole .bh-disk { position: absolute; inset: 1px; border-radius: 50%;
   background: conic-gradient(from 0deg, transparent 0 10%, #F6B26B 18%, #FFE8C2 26%, transparent 38%, #7FD3F7 58%, transparent 70%, #F6B26B 86%, transparent);

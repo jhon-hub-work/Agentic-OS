@@ -48,6 +48,12 @@ class Harness:
     # ── isolation ─────────────────────────────────────────────
     def _redirect_paths(self):
         """Point every module path global at the temp dir."""
+        # every server path under the old root moves too (skill lab runs, tickets, Jharvis files...): a test server's
+        # start-up must never touch real data (it once marked a live skill-lab run as interrupted, 29 Oct)
+        old = server.BASE_DIR
+        for name, value in list(vars(server).items()):
+            if isinstance(value, Path) and value != old and value.is_relative_to(old):
+                setattr(server, name, self.tmp / value.relative_to(old))
         server.BASE_DIR = self.tmp
         server.ERROR_LOG_FILE = self.tmp / "data" / "error-log.json"
         server.CIRCUIT_BREAKER_FILE = self.tmp / "data" / "circuit-breaker.json"

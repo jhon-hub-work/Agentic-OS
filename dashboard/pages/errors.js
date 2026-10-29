@@ -130,7 +130,7 @@ async function loadCircuitBreaker() {
             <span style="font-size:20px">${agentIcons[a] || '🤖'}</span>
             <div>
               <div style="font-weight:600;text-transform:capitalize">${escapeHtml(a)}</div>
-              <div style="font-size:12px;color:${isOpen ? 'var(--red)' : 'var(--green)'}">${cb.state || 'closed'}</div>
+              <div style="font-size:12px;color:${isOpen ? 'var(--red)' : 'var(--green)'}">${escapeHtml(cb.state || 'closed')}</div>
             </div>
           </div>
           <div style="display:flex;gap:8px;font-size:12px;color:var(--text-muted);margin-bottom:8px">
