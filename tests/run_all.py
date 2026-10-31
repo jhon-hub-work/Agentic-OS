@@ -24,13 +24,14 @@ import test_skill_lab  # noqa: E402
 import test_watchdog  # noqa: E402
 import test_agent_limits  # noqa: E402
 import test_approvals  # noqa: E402
+import test_tidy  # noqa: E402
 
 
 def main() -> int:
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for module in (test_core, test_security, test_kanban_journal,
-                   test_memory_scheduler, test_v40, test_jobs_scheduler, test_jharvis_screen, test_skill_lab, test_watchdog, test_agent_limits, test_approvals):
+                   test_memory_scheduler, test_v40, test_jobs_scheduler, test_jharvis_screen, test_skill_lab, test_watchdog, test_agent_limits, test_approvals, test_tidy):
         suite.addTests(loader.loadTestsFromModule(module))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

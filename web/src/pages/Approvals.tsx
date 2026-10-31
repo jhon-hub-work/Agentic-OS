@@ -1,4 +1,4 @@
-import { ArrowSquareOut, Briefcase, Check, Lightning, Ticket, Waveform, X, type Icon } from '@phosphor-icons/react'
+import { ArrowSquareOut, Briefcase, Broom, Check, Lightning, Robot, Ticket, UsersThree, Waveform, X, type Icon } from '@phosphor-icons/react'
 import { useState } from 'react'
 import { api, timeAgo, type Approval } from '../api'
 import { Empty, ErrorLine, PageHead, Panel, Skeleton, inputCls, usePoll } from '../ui'
@@ -9,6 +9,9 @@ const KIND: Record<Approval['kind'], { icon: Icon; label: string; yes: string; n
   job: { icon: Briefcase, label: 'Job application', yes: 'Approve and send', no: 'Skip' },
   jharvis: { icon: Waveform, label: 'Jharvis action', yes: 'Approve', no: 'Deny' },
   skill: { icon: Lightning, label: 'Skill install', yes: 'Install anyway', no: 'Don\'t install' },
+  tidy: { icon: Broom, label: 'D: tidy', yes: 'Do Jharvis\'s pick', no: 'Keep it' },
+  crew: { icon: Robot, label: 'Designated agent', yes: 'Approve', no: 'Deny' },
+  meeting: { icon: UsersThree, label: "Agents' meeting", yes: 'Build it', no: 'Drop it' },
 }
 const btn = 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:cursor-not-allowed disabled:opacity-50'
 

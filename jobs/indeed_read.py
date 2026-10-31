@@ -20,9 +20,12 @@ def main(link: str) -> dict:
     import apply as applier
 
     jk = applier.indeed_key(link)
-    if not jk:
+    if jk:
+        url = f"https://ph.indeed.com/viewjob?jk={jk}"
+    elif re.match(r"https://\w+\.indeed\.com/pagead/clk\?", link):  # an alert mail's job link: Brave follows it to the job
+        url = link
+    else:
         return {"error": "not an Indeed job link (it needs jk= or vjk= in it)"}
-    url = f"https://ph.indeed.com/viewjob?jk={jk}"
     title, text = applier.indeed_jd(url)
     if not text or "moment" in (title or "").lower():
         return {"error": "Indeed asked for a check: open the link once in Hoot's Brave, then try again"}

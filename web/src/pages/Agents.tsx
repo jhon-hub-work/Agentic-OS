@@ -1,6 +1,6 @@
 import { Plug, Plus } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
-import { AGENT_META, api, loadAgents, type AgentName, type ModelChoice, type Plugin } from '../api'
+import { AGENT_META, api, loadAgents, type AgentName, type AgentProvider, type CatalogAgent, type ModelChoice, type Plugin } from '../api'
 import { AgentLogo, AgentPicker, ChromeButton, Field, ModelPick, PageHead, Panel, Skeleton, inputCls, useModelInfo } from '../ui'
 import { PairPhone } from '../Phone'
 
@@ -15,6 +15,7 @@ export default function Agents() {
   return (
     <>
       <PageHead eyebrow="Agents & tools" title="Models and connections" sub="Choose each agent's model, and connect MCP servers (tools like Notion, GitHub, a database) to the agents that should use them." />
+      <Panel className="mb-5"><Keys /></Panel>
       <Panel className="mb-5"><Relogin /></Panel>
       <Panel className="mb-5"><MyAgents /></Panel>
       <Panel className="mb-5"><Models /></Panel>
@@ -134,6 +135,35 @@ function AddConnection({ onAdded }: { onAdded: () => void }) {
 type Login = { id: string; label: string; last: string; due: string; overdue: boolean }
 
 // Weekly re-login for security: a button opens a terminal on the PC that logs the account out and starts its login.
+// API keys the OS's own code uses (Zernio posts for designated agents). Write-only: a saved key is never shown again.
+function Keys() {
+  const [data, setData] = useState<{ keys: Record<string, string>; set: string[] } | null>(null)
+  const [vals, setVals] = useState<Record<string, string>>({})
+  const [msg, setMsg] = useState<string | null>(null)
+  const load = () => api.secrets().then(setData).catch(e => setMsg((e as Error).message))
+  useEffect(() => { load() }, [])
+  async function save(name: string) {
+    try { await api.setSecret(name, vals[name] ?? ''); setVals({ ...vals, [name]: '' }); setMsg(`${name} saved.`); load() }
+    catch (e) { setMsg((e as Error).message) }
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      <h2 className="text-lg font-medium tracking-tight text-ink">Keys</h2>
+      <p className="text-sm text-ink-3">Saved on the PC only (config/secrets.json, never in git). Once saved, a key isn't shown again; paste a new one to replace it.</p>
+      {data && Object.entries(data.keys).map(([name, label]) => (
+        <div key={name} className="flex flex-wrap items-center gap-2">
+          <label htmlFor={`k-${name}`} className="w-64 text-sm text-ink">{label}{data.set.includes(name) && <span className="ml-2 text-xs text-good">saved</span>}</label>
+          <input id={`k-${name}`} type="password" autoComplete="off" value={vals[name] ?? ''} onChange={e => setVals({ ...vals, [name]: e.target.value })}
+            placeholder={data.set.includes(name) ? 'Paste a new key to replace' : 'Paste the key'} className={`${inputCls} max-w-md flex-1`} />
+          <button type="button" disabled={!(vals[name] ?? '').trim()} onClick={() => save(name)}
+            className="inline-flex min-h-11 cursor-pointer items-center rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:opacity-50">Save</button>
+        </div>
+      ))}
+      {msg && <p role="status" className="text-sm text-ink-2">{msg}</p>}
+    </div>
+  )
+}
+
 function Relogin() {
   const [accounts, setAccounts] = useState<Login[] | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
@@ -215,6 +245,92 @@ const PRESETS = [
     model_args: '-m {model}', effort_args: '-c model_reasoning_effort={effort}' },
 ]
 
+/** One-tap sign-in apps: the server knows each one's read-only command, so nothing is typed. */
+function SignInTiles({ onAdded }: { onAdded: (text: string) => void }) {
+  const [list, setList] = useState<CatalogAgent[] | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const load = () => api.agentCatalog().then(r => setList(r.catalog)).catch(e => setMsg({ ok: false, text: e.message }))
+  useEffect(() => { load() }, [])
+  async function tap(c: CatalogAgent) {
+    setBusy(c.id); setMsg({ ok: true, text: `Checking ${c.label} (up to a few minutes)…` })
+    try {
+      const r = await api.addCatalogAgent(c.id)
+      if (r.status === 'added') { setMsg(null); onAdded(`Added ${c.label}. Test answer: "${r.test_answer}"`) }
+      else setMsg({ ok: true, text: r.text })
+      load()
+    } catch (x) { setMsg({ ok: false, text: (x as Error).message }) } finally { setBusy(null) }
+  }
+  if (!list) return <Skeleton className="h-16" />
+  return (
+    <>
+      <div className="flex flex-wrap gap-2">
+        {list.map(c => (
+          <button key={c.id} type="button" disabled={busy !== null || c.added} onClick={() => tap(c)} title={c.note}
+            className="flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:cursor-default disabled:opacity-60">
+            {c.label}{c.added ? ' ✓' : busy === c.id ? '…' : !c.installed ? ' (installs)' : ''}
+          </button>
+        ))}
+      </div>
+      {msg && <p role={msg.ok ? 'status' : 'alert'} className={`text-sm ${msg.ok ? 'text-ink-2' : 'text-bad'}`}>{msg.text}</p>}
+    </>
+  )
+}
+
+/** Add with an API key: pick the company, paste the key, pick a model. No command, so it works from the phone too. */
+function ApiKeyAdd({ onAdded }: { onAdded: (text: string) => void }) {
+  const [providers, setProviders] = useState<AgentProvider[]>([])
+  const [f, setF] = useState({ provider: 'openrouter', key: '', model: '', label: '', role: '' })
+  const [models, setModels] = useState<string[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  useEffect(() => { api.agentProviders().then(r => setProviders(r.providers)).catch(() => {}) }, [])
+  const p = providers.find(x => x.id === f.provider)
+  async function loadModels() {
+    setBusy(true); setMsg(null)
+    try { const r = await api.providerModels(f.provider, f.key); setModels(r.models); if (!r.models.length) setMsg({ ok: false, text: 'No models came back: type the model name.' }) }
+    catch (x) { setModels(null); setMsg({ ok: false, text: (x as Error).message }) } finally { setBusy(false) }
+  }
+  async function add(e: React.FormEvent) {
+    e.preventDefault()
+    if (!f.key && !p?.has_key) { setMsg({ ok: false, text: 'Paste the key first.' }); return }
+    if (!f.model.trim()) { setMsg({ ok: false, text: 'Pick a model.' }); return }
+    setBusy(true); setMsg({ ok: true, text: 'Testing it…' })
+    try {
+      const r = await api.addApiAgent(f)
+      setF({ ...f, key: '', model: '', label: '', role: '' }); setModels(null); setMsg(null)
+      api.agentProviders().then(x => setProviders(x.providers)).catch(() => {})
+      onAdded(`Added ${r.label}. Test answer: "${r.test_answer}"`)
+    } catch (x) { setMsg({ ok: false, text: (x as Error).message }) } finally { setBusy(false) }
+  }
+  return (
+    <form onSubmit={add} className="flex flex-col gap-3">
+      <Field id="api-provider" label="Company">
+        <select id="api-provider" value={f.provider} onChange={e => { setF({ ...f, provider: e.target.value, model: '' }); setModels(null) }} className={inputCls}>
+          {providers.map(x => <option key={x.id} value={x.id}>{x.label}{x.has_key ? ' (key saved)' : ''}</option>)}
+        </select>
+      </Field>
+      <Field id="api-key" label="API key" help={p ? <>{p.has_key ? 'Saved already: leave empty to use it. ' : ''}<a href={p.keys_url} target="_blank" rel="noreferrer" className="underline">Get a {p.label} key</a></> : undefined}>
+        <input id="api-key" type="password" autoComplete="off" value={f.key} onChange={e => setF({ ...f, key: e.target.value })} placeholder={p?.has_key ? 'Using the saved key' : 'Paste it here'} className={`${inputCls} font-mono text-sm`} />
+      </Field>
+      <div className="flex items-end gap-2">
+        <div className="min-w-0 flex-1"><Field id="api-model" label="Model">
+          <input id="api-model" list="api-models" value={f.model} onChange={e => setF({ ...f, model: e.target.value })} placeholder={models ? `Search ${models.length} models` : 'Load the list, or type a name'} className={`${inputCls} font-mono text-sm`} />
+          <datalist id="api-models">{models?.map(m => <option key={m} value={m} />)}</datalist>
+        </Field></div>
+        <button type="button" onClick={loadModels} disabled={busy} className="min-h-11 cursor-pointer rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:opacity-50">Load models</button>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <Field id="api-label" label="Name (optional)"><input id="api-label" value={f.label} onChange={e => setF({ ...f, label: e.target.value })} placeholder={f.model.split('/').pop() || 'The model name'} className={inputCls} /></Field>
+        <Field id="api-role" label="What it's for (optional)"><input id="api-role" value={f.role} onChange={e => setF({ ...f, role: e.target.value })} placeholder="General answers" className={inputCls} /></Field>
+      </div>
+      <p className="text-xs text-ink-3">It only answers: it can't open your files or search the web.</p>
+      {msg && <p role={msg.ok ? 'status' : 'alert'} className={`text-sm ${msg.ok ? 'text-ink-2' : 'text-bad'}`}>{msg.text}</p>}
+      <ChromeButton type="submit" disabled={busy} icon={<Plus size={16} weight="bold" aria-hidden="true" />}>{busy ? 'Working' : 'Test and add'}</ChromeButton>
+    </form>
+  )
+}
+
 /** Jhon's own command-line agents: they join chats, sessions, teams and schedules like the built-in four. */
 function MyAgents() {
   const [list, setList] = useState(() => Object.entries(AGENT_META).filter(([, m]) => m.custom))
@@ -261,7 +377,22 @@ function MyAgents() {
           </li>
         ))}
       </ul>}
-      <form onSubmit={add} className="flex flex-col gap-4">
+      <h3 className="text-sm font-medium text-ink">Add an agent</h3>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <div className="flex flex-col gap-3 rounded-2xl border border-white bg-white/55 p-4">
+          <p className="text-sm font-medium text-ink">Sign in</p>
+          <p className="text-xs text-ink-3">For apps with a login. Tap one: it installs and opens the sign-in on the PC if needed. Tap again once you're signed in. These can read files and search the web.</p>
+          <SignInTiles onAdded={async text => { await refresh(); setMsg({ ok: true, text }) }} />
+        </div>
+        <div className="flex flex-col gap-3 rounded-2xl border border-white bg-white/55 p-4">
+          <p className="text-sm font-medium text-ink">API key</p>
+          <ApiKeyAdd onAdded={async text => { await refresh(); setMsg({ ok: true, text }) }} />
+        </div>
+      </div>
+      {msg && <p role={msg.ok ? 'status' : 'alert'} className={`text-sm ${msg.ok ? 'text-ink-2' : 'text-bad'}`}>{msg.text}</p>}
+      <details className="rounded-2xl border border-white bg-white/40 p-4">
+        <summary className="cursor-pointer text-sm text-ink-2">Advanced: add any program by its command (PC only)</summary>
+      <form onSubmit={add} className="mt-4 flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-2 text-sm text-ink-2">Quick fill:
           {PRESETS.map(p => <button type="button" key={p.id} onClick={() => setF({ ...f, ...p })}
             className="min-h-11 cursor-pointer rounded-full border border-white bg-white/70 px-4 text-ink hover:bg-white">{p.label}</button>)}
@@ -291,9 +422,9 @@ function MyAgents() {
             <input id="ag-logo" type="file" accept=".svg,.png,.webp,.jpg" onChange={e => setLogo(e.target.files?.[0] ?? null)} className="text-sm text-ink-2" />
           </Field>
         </div>
-        {msg && <p role={msg.ok ? 'status' : 'alert'} className={`text-sm ${msg.ok ? 'text-ink-2' : 'text-bad'}`}>{msg.text}</p>}
         <ChromeButton type="submit" disabled={busy} icon={<Plus size={16} weight="bold" aria-hidden="true" />}>{busy ? 'Testing' : 'Test and add'}</ChromeButton>
       </form>
+      </details>
     </div>
   )
 }

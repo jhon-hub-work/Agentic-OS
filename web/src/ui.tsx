@@ -102,7 +102,7 @@ export function AgentPicker<T extends string>({ value, onChange, multi = false, 
 
 export const inputCls = 'w-full rounded-2xl border border-steel/80 bg-white/70 px-4 py-3 text-[15px] text-ink placeholder:text-ink-3 focus:outline-2 focus:outline-offset-2 focus:outline-navy'
 
-export function Field({ id, label, help, error, children }: { id: string; label: string; help?: string; error?: string | null; children: ReactNode }) {
+export function Field({ id, label, help, error, children }: { id: string; label: string; help?: ReactNode; error?: string | null; children: ReactNode }) {
   return (
     <div className="flex flex-col gap-2">
       <label htmlFor={id} className="text-sm font-medium text-ink">{label}</label>

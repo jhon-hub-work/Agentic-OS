@@ -1,4 +1,4 @@
-import { CaretLeft, CaretRight, DotsThree, PaperPlaneRight, Plus, Waveform } from '@phosphor-icons/react'
+import { CaretLeft, CaretRight, Check, DotsThree, PaperPlaneRight, Plus, Waveform, X } from '@phosphor-icons/react'
 import { motion } from 'motion/react'
 import { useEffect, useRef, useState } from 'react'
 import { AGENT_META, api, fmtTokens, timeAgo, type AgentName, type ModelChoice, type Session, type SessionItem, type SessionMsg } from '../api'
@@ -184,6 +184,7 @@ function SessionView({ s }: { s: Session }) {
                 className="rounded-2xl border border-white bg-white/85 p-5">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium text-navy"><Waveform size={20} aria-hidden="true" />Jharvis's answer</div>
                 <Prose text={verdict.content} />
+                <Decision s={s} verdict={verdict} />
               </motion.div>
             )}
             {agentMsgs.length > 0 && (verdict
@@ -208,6 +209,12 @@ function SessionView({ s }: { s: Session }) {
       )}
       <SessionModels agents={s.agents} value={models} onChange={setModels} disabled={s.status === 'running'}
         onDone={() => api.patchSession(s.id, { overrides: models }).then(r => setModels(r.overrides ?? {})).catch(err => setError((err as Error).message))} />
+      {s.status === 'awaiting_user' && !!s.questions?.length && (
+        <div className="rounded-2xl border border-steel/40 p-4 text-sm text-ink-2" aria-live="polite">
+          <p className="font-medium text-ink">Waiting on you</p>
+          <ul className="mt-2 list-disc pl-5">{s.questions.map(q => <li key={q}>{q}</li>)}</ul>
+        </div>
+      )}
       <form onSubmit={reply} className="flex flex-col gap-2 border-t border-white/80 pt-4 sm:flex-row sm:items-end">
         <label htmlFor="s-reply" className="sr-only">Reply to the session</label>
         <textarea id="s-reply" rows={2} value={text} onChange={e => setText(e.target.value)} disabled={s.status === 'running'}
@@ -334,5 +341,33 @@ function SessionRow({ s, active, sections, renaming, onOpen, onRenameStart, onRe
         </div>
       )}
     </li>
+  )
+}
+
+// Approve: a ticket that gets planned, built by Claude and checked by another agent. Deny: more rounds, then a new decision.
+function Decision({ s, verdict }: { s: Session; verdict: SessionMsg }) {
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const d = verdict.decision
+  if (d) return <p className="mt-3 text-sm text-ink-2">{d.approved ? `You approved it. Building it as ${d.ticket} (see Tickets).` : 'You denied it. They went another round.'}</p>
+  if (s.status !== 'idle' || s.messages[s.messages.length - 1] !== verdict) return null
+  const btn = 'inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-white bg-white/70 px-4 text-sm text-ink hover:bg-white disabled:cursor-not-allowed disabled:opacity-50'
+  async function decide(approve: boolean) {
+    setBusy(true); setErr(null)
+    try { await api.sessionDecision(s.id, approve, note.trim()) }
+    catch (e) { setErr((e as Error).message) }
+    finally { setBusy(false) }
+  }
+  return (
+    <div className="mt-4 flex flex-col gap-2 border-t border-white pt-4">
+      <input value={note} onChange={e => setNote(e.target.value)} aria-label="Why you deny it (optional)"
+        placeholder="Denying? Say what's wrong (optional, else they ask you)" className={inputCls} />
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => decide(true)} disabled={busy} className={btn}><Check size={14} aria-hidden="true" />Approve and build</button>
+        <button onClick={() => decide(false)} disabled={busy} className={btn}><X size={14} aria-hidden="true" />Deny</button>
+      </div>
+      {err && <ErrorLine msg={err} />}
+    </div>
   )
 }

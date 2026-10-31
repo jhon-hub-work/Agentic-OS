@@ -152,18 +152,35 @@ body { margin: 0; font-family: var(--font-sans); -webkit-font-smoothing: antiali
 :root.dark .prose-glacier pre { background: #050A12; }
 :root.dark .prose-glacier th, :root.dark .prose-glacier td { border-bottom-color: rgba(255, 255, 255, 0.08); }
 :root.dark .shimmer { background-image: linear-gradient(90deg, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0.1) 50%, rgba(255,255,255,0.03) 100%); }
-/* the theme switch: a black hole in light mode, a captured star in dark mode */
-.black-hole { width: 44px; height: 44px; border: 0; border-radius: 50%; cursor: pointer; background: none; padding: 0; }
+/* the theme switch (Jhon 30 Oct): our own black hole (he preferred it to his picture for its clean motion). Light mode =
+   the black hole: a dark core with a hint of blue, warm light wrapping it, a tilted spinning disk with bright ring lines;
+   dark mode = the white hole, a white ball in a dark ringed disk (Jhon 31 Oct: it was the other way round).
+   Transparent around it. Layers: back disk, light ring, core, front disk. */
+.black-hole { --fire: #ff6a2a, #ffcf9e, #fff4e8, #ff9a5c, #ffb3a0, #ffffff, #ff8a3d, #ff6a2a;
+  --core: radial-gradient(circle at 50% 85%, #1d3a8a, #04060c 62%); --ring: rgba(255,246,232,1); --glow: rgba(255,170,90,.95);
+  filter: brightness(1.35) saturate(1.3) drop-shadow(0 0 6px rgba(255,150,70,.55));
+  width: 44px; height: 44px; border: 0; border-radius: 50%; cursor: pointer; background: none; padding: 0; overflow: visible; }
+:root.dark .black-hole { --fire: #fff, #9fb0c4, #fff, #5f7286, #fff, #c9d4df, #fff;  /* light disk, or it vanishes on dark */
+  --core: #fff; --ring: rgba(255,255,255,.9); --glow: rgba(200,225,255,.55); filter: none; }
 .black-hole:focus-visible { outline: 2px solid var(--color-navy); outline-offset: 4px; }
-.black-hole .bh-core { position: absolute; inset: 11px; border-radius: 50%; background: #000; box-shadow: 0 0 0 2px rgba(255,255,255,.08), 0 0 16px 3px rgba(0,0,0,.35); transition: background .5s, box-shadow .5s; }
-.black-hole .bh-disk { position: absolute; inset: 1px; border-radius: 50%;
-  background: conic-gradient(from 0deg, transparent 0 10%, #F6B26B 18%, #FFE8C2 26%, transparent 38%, #7FD3F7 58%, transparent 70%, #F6B26B 86%, transparent);
-  -webkit-mask: radial-gradient(circle, transparent 46%, #000 48%, #000 62%, transparent 72%);
-          mask: radial-gradient(circle, transparent 46%, #000 48%, #000 62%, transparent 72%);
-  animation: bh-spin 6s linear infinite; filter: blur(.6px); opacity: .9; }
-.black-hole.bh-busy .bh-disk { animation-duration: .45s; }
-:root.dark .black-hole .bh-core { background: radial-gradient(circle, #FFFBEA, #FFD27A 45%, #F59E0B 70%); box-shadow: 0 0 22px 7px rgba(255,210,122,.5); }
-:root.dark .black-hole .bh-disk { opacity: .35; }
+.black-hole .bh-back, .black-hole .bh-front { position: absolute; left: -12px; right: -12px; top: 50%; height: 68px; margin-top: -34px;
+  border-radius: 50%; transform: rotate(-20deg) scaleY(.36); pointer-events: none; }
+.black-hole .bh-back::after, .black-hole .bh-front::after { content: ''; position: absolute; inset: 0; border-radius: 50%; mix-blend-mode: screen;
+  background: repeating-radial-gradient(circle, rgba(255,255,255,.55) 0 1px, transparent 1px 4px);
+  -webkit-mask: radial-gradient(circle, transparent 27%, #000 30%, transparent 70%); mask: radial-gradient(circle, transparent 27%, #000 30%, transparent 70%); }
+.black-hole .bh-front { clip-path: inset(50% 0 0 0); }
+.black-hole .bh-back::before, .black-hole .bh-front::before, .black-hole .bh-arc::before { content: ''; position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(var(--fire)); animation: bh-spin 5s linear infinite; filter: blur(.7px); }
+.black-hole .bh-back::before, .black-hole .bh-front::before {  /* brightest at the inner edge, fading out */
+  -webkit-mask: radial-gradient(circle, transparent 26%, #000 29%, rgba(0,0,0,.85) 50%, transparent 72%);
+          mask: radial-gradient(circle, transparent 26%, #000 29%, rgba(0,0,0,.85) 50%, transparent 72%); }
+/* "a black circle with light surrounding it": a full soft ring of light around the core, behind the disk */
+.black-hole .bh-arc { position: absolute; inset: 4px; border-radius: 50%; pointer-events: none; }
+.black-hole .bh-arc::before { -webkit-mask: radial-gradient(circle, transparent 48%, #000 52%, rgba(0,0,0,.6) 60%, transparent 82%);
+          mask: radial-gradient(circle, transparent 48%, #000 52%, rgba(0,0,0,.6) 60%, transparent 82%); animation-direction: reverse; filter: blur(1.2px) brightness(1.15); }
+.black-hole .bh-core { position: absolute; inset: 13px; border-radius: 50%; background: var(--core);
+  box-shadow: 0 0 0 1px var(--ring), 0 0 10px 3px var(--glow); transition: background .5s, box-shadow .5s; }
+.black-hole.bh-busy .bh-back::before, .black-hole.bh-busy .bh-front::before, .black-hole.bh-busy .bh-arc::before { animation-duration: .45s; }
 @keyframes bh-spin { to { transform: rotate(360deg); } }
 ::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
 

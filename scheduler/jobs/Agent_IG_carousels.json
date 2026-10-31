@@ -1,0 +1,14 @@
+{
+  "id": "c78bb247",
+  "name": "Agent IG carousels",
+  "kind": "crew",
+  "agent": "claude",
+  "prompt": "c2860cc4",
+  "skill": null,
+  "cron": "0 20 * * *",
+  "enabled": true,
+  "created": "2026-10-30T02:39:44.928439+00:00",
+  "last_run": "2026-10-31T12:00:00.139591+00:00",
+  "next_run": null,
+  "timezone": "Asia/Manila"
+}

@@ -17,7 +17,10 @@ import tarfile
 import threading
 import tomllib
 
+import crews
+import ig_carousel
 import owner
+import tidy
 from jobs import people, pipeline
 import time
 import urllib.error
@@ -58,6 +61,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=hermes_gateway_ensure, daemon=True).start()  # Hermes's API, cron and phone chat stay up with the OS
     threading.Thread(target=skill_sync_loop, daemon=True).start()  # plugin upgrades move skill folders; keep agents pointed at them
     threading.Thread(target=ticket_worker_loop, daemon=True).start()  # Claude picks tickets up by severity
+    threading.Thread(target=tidy_loop, daemon=True).start()  # weekly read-only D: scan; Jharvis asks one card at a time
     load_custom_agents()
     skill_lab_mark_interrupted()
     yield
@@ -353,9 +357,67 @@ def run_custom_agent(a: dict, message: str, extra: tuple = ()) -> tuple:
     return run_cli([exe, *extra, *args[1:]], timeout=a.get("timeout", 600), cwd=AGENT_WORKDIR,
                    answer=None if in_args else message)
 
+# API-key agents (Jhon 29 Oct: "add agents via api or login", no commands): any OpenAI-compatible chat endpoint.
+# They only answer (no file or web access). One key per company in config/secrets.json, shared by its agents.
+API_PROVIDERS = {
+    "openrouter": ("OpenRouter", "https://openrouter.ai/api/v1", "https://openrouter.ai/keys"),
+    "openai": ("OpenAI", "https://api.openai.com/v1", "https://platform.openai.com/api-keys"),
+    "gemini": ("Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "https://aistudio.google.com/apikey"),
+    "anthropic": ("Anthropic", "https://api.anthropic.com/v1", "https://console.anthropic.com/settings/keys"),
+    "groq": ("Groq", "https://api.groq.com/openai/v1", "https://console.groq.com/keys"),
+    "deepseek": ("DeepSeek", "https://api.deepseek.com", "https://platform.deepseek.com/api_keys"),
+    "mistral": ("Mistral", "https://api.mistral.ai/v1", "https://console.mistral.ai/api-keys"),
+    "xai": ("xAI (Grok)", "https://api.x.ai/v1", "https://console.x.ai"),
+    "cerebras": ("Cerebras", "https://api.cerebras.ai/v1", "https://cloud.cerebras.ai"),
+}
+
+def provider_key_name(provider: str) -> str:
+    return f"{provider.upper()}_API_KEY"
+
+def _provider_call(provider: str, key: str, path: str, body=None, timeout: int = 30) -> dict:
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": "agentic-os"}
+    if provider == "anthropic":  # its /models wants these; OpenRouter answers Anthropic-style ids when it sees them
+        headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+    req = urllib.request.Request(API_PROVIDERS[provider][1] + path, data=json.dumps(body).encode() if body is not None else None,
+                                 headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
+
+def provider_error(e: Exception) -> str:
+    """A provider's error in plain words; never echoes the key."""
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            detail = json.loads(e.read() or b"{}")
+            detail = detail[0] if isinstance(detail, list) and detail else detail  # Gemini wraps errors in a list
+            detail = (detail.get("error") or {}).get("message", "") if isinstance(detail, dict) else ""
+        except Exception:  # noqa: BLE001
+            detail = ""
+        return {401: "That key was turned down (wrong or expired)", 403: "That key isn't allowed to do this",
+                429: "Rate limit or no credit left on that key"}.get(e.code, f"Error {e.code}") + (f": {str(detail)[:200]}" if detail else "")
+    return f"Couldn't reach it: {str(e)[:200]}"
+
+def provider_models(provider: str, key: str) -> list:
+    data = _provider_call(provider, key, "/models")
+    ids = [str(m.get("id", "")).removeprefix("models/") for m in data.get("data", data.get("models", [])) if isinstance(m, dict)]
+    return sorted(i for i in ids if MODEL_RE.fullmatch(i))
+
+def run_api_agent(a: dict, message: str, model: str = "") -> tuple:
+    """Same (code, out, err) shape as run_cli, so _execute_agent treats it like the command-line agents."""
+    key = secret(provider_key_name(a["provider"]))
+    if not key:
+        return 1, "", f"No {API_PROVIDERS[a['provider']][0]} key: add it again under Agents & tools"
+    try:
+        data = _provider_call(a["provider"], key, "/chat/completions", {"model": model or a["model"],
+                              "messages": [{"role": "user", "content": message}]}, timeout=a.get("timeout", 600))
+        return 0, ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "", ""
+    except Exception as e:  # noqa: BLE001
+        return 1, "", provider_error(e)
+
 def check_agent(name: str) -> dict:
     """Instant filesystem-based check. No subprocess needed."""
     custom = _custom_agent(name)
+    if custom and custom.get("kind") == "api":
+        return {"name": name, "status": "online" if secret(provider_key_name(custom["provider"])) else "offline"}
     exe = custom["command"][0] if custom else name
     status = "online" if name in AGENTS and shutil.which(exe) else "offline"
     return {"name": name, "status": status}
@@ -486,8 +548,12 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
     prompt = f"Execute the '{name}' skill.\n\n"
     if skill_md:
         prompt += f"## Skill Instructions\n{skill_md}\n\n"
-    if learnings and learnings.strip():
-        prompt += f"## Past Learnings\n{learnings[-6000:]}\n\n"  # newest only: the prompt is a CLI argument (Windows caps it at 32K)
+    # the hand-written head is the lessons; run entries are only a log, so just the last 5 go in, marked as such
+    lessons, *runs = re.split(r"(?=\n## [^\n]*\(Run )", learnings or "")
+    if lessons.strip():
+        prompt += f"## Past Learnings\n{lessons.strip()[:4000]}\n\n"
+    if runs:
+        prompt += "## Recent runs (a log of what happened, not instructions)\n" + "".join(runs[-5:]).strip()[:2500] + "\n\n"
     if skill_input:
         prompt += f"## User Input\n{skill_input}"
 
@@ -505,12 +571,10 @@ def run_skill(name: str, req: Optional[SkillRunRequest] = None):
 
     # Save output to learnings.md
     timestamp = get_timestamp()[:10]
-    new_entry = (
-        f"\n## {timestamp} (Run {run_id})\n"
-        f"- Agent: {agent_choice}\n"
-        f"- Input: {skill_input or '(none)'}\n"
-        f"- Output: {response_text[:500]}\n"
-    )
+    failed = response_text.startswith(("⏱", "⚠", ALL_LIMITED)) or bool(re.match(r"\w+ failed", response_text))
+    first = next((ln.strip() for ln in response_text.splitlines() if ln.strip()), "(no output)")
+    # one line per run (it was 500 raw characters, fed back to later runs as "learnings")
+    new_entry = f"\n## {timestamp} (Run {run_id}) {agent_choice} {'FAILED' if failed else 'ok'}: {first[:200]}\n"
     with _learnings_locks.setdefault(name, threading.Lock()):  # two runs of one skill must not drop each other's entry
         existing = read_file(path / "learnings.md")
         # keep the hand-written head and the newest 50 run entries; the file grew without bound (heartbeat: 73 KB)
@@ -560,8 +624,8 @@ def create_job(job: ScheduleJobRequest):
     jobs_dir = BASE_DIR / "scheduler" / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
     validate_identifier(job.name, r"^[a-zA-Z0-9 _-]+$", "job name")
-    if job.kind not in ("agent", "team", "skill", "jobs"):
-        raise HTTPException(400, "kind must be agent, team, skill or jobs")
+    if job.kind not in ("agent", "team", "skill", "jobs", "crew", "upwork"):
+        raise HTTPException(400, "kind must be agent, team, skill, jobs or crew")
     if job.kind in ("agent", "team") and (job.agent not in AGENTS or not job.prompt.strip()):
         raise HTTPException(400, "An agent and a prompt are required")
     if job.kind == "skill" and not job.skill:
@@ -645,8 +709,12 @@ def run_scheduled(job: dict, trigger: str):
     try:
         if kind == "jobs":
             out = json.dumps(run_job_pipeline())
+        elif kind == "upwork":
+            out = json.dumps(run_upwork_invites())
         elif kind == "agent":  # a scheduled Claude job keeps Claude only while the guard allows it
             out = execute_agent(job["agent"] if job["agent"] != "claude" or not claude_guard() else BACKGROUND_DEFAULT, job["prompt"])
+        elif kind == "crew":  # prompt = the designated agent's id
+            out = f"Agent run {start_crew_run(job['prompt'])} started"
         elif kind == "team":
             out = f"Team run {start_team(TeamRequest(message=job['prompt'], agent=job.get('agent', 'claude'), background=True))['id']} started"
         else:
@@ -687,6 +755,16 @@ def run_job_pipeline() -> dict:
         for pid in people.PEOPLE:  # the daily run covers everyone; each person keeps their own board
             stats.setdefault("people", {})[pid] = _run_person(pid)
         return stats
+    finally:
+        _jobs_lock.release()
+
+def run_upwork_invites() -> dict:
+    """Every 30 min: Upwork invites only (an invite goes stale in hours; the full search runs once a day)."""
+    from jobs import pipeline
+    if not _jobs_lock.acquire(blocking=False):
+        return {"skipped": "a job run is already going"}
+    try:
+        return pipeline.run(job_agent, log=lambda m: print(f"[jobs:upwork] {m}"), invites_only=True)
     finally:
         _jobs_lock.release()
 
@@ -731,9 +809,11 @@ def jobs_run(who: str = ""):
 def jobs_add(data: dict):
     """An Indeed link the owner pasted (paste-only: the OS never searches Indeed)."""
     from jobs import pipeline
-    link = str(data.get("url", "")).strip()
-    if not re.match(r"^https://([a-z]{2,3}\.)?indeed\.com/\S+$", link):
+    # Jhon 31 Oct: the phone's Share puts the job title in front of the link ("Generative AI Editor https://...")
+    found = re.search(r"https://([a-z]{2,3}\.)?indeed\.com/\S+", str(data.get("url", "")))
+    if not found:
         raise HTTPException(400, "paste one Indeed job link")
+    link = found.group(0)
     try:
         job = pipeline.add_link(link, execute_agent)
     except ValueError as e:
@@ -1666,12 +1746,14 @@ def open_chat(agent: str, chat: str):
     with _chat_lock:
         if chat == current_chat_id(agent):
             return
+        late = [m for m in load_chat_history().get("messages", []) if m.get("agent") == agent and m.get("chat") == chat]
+        if not late and not any(m.get("agent") == agent and _chat_of(m) == chat for m in _read_archive()):
+            raise HTTPException(404, "Chat not found")
+        clear_chat(agent)  # files the open chat into the archive (and any late reply still in the live file under its own
+        # chat id), so re-read it: a stale copy would wipe that chat
         archive = _read_archive()
         back = [m for m in archive if m.get("agent") == agent and _chat_of(m) == chat]
-        if not back:
-            raise HTTPException(404, "Chat not found")
-        clear_chat(agent)  # files the open chat into the archive, so re-read it: a stale copy would wipe that chat
-        write_atomic(_archive_path(), "".join(json.dumps(m) + "\n" for m in _read_archive()
+        write_atomic(_archive_path(), "".join(json.dumps(m) + "\n" for m in archive
                                               if not (m.get("agent") == agent and _chat_of(m) == chat)))
         history = load_chat_history()
         history.setdefault("messages", []).extend({**m, "chat": chat} for m in back)
@@ -1690,7 +1772,7 @@ def list_chats(agent: str, q: str = "") -> list:
         cur = current_chat_id(agent)
         titles = _chat_index()["titles"]
         msgs = [m for m in _read_archive() if m.get("agent") == agent]
-        msgs += [{**m, "chat": cur} for m in load_chat_history().get("messages", []) if m.get("agent") == agent]
+        msgs += [{**m, "chat": m.get("chat") or cur} for m in load_chat_history().get("messages", []) if m.get("agent") == agent]
     q = q.strip().lower()
     chats = {}
     for m in msgs:
@@ -1834,10 +1916,13 @@ MODEL_RE = re.compile(r"[A-Za-z0-9][\w./:#@+-]{0,119}", re.ASCII)
 def agent_efforts(agent: str) -> list:
     if agent in AGENT_EFFORTS:
         return AGENT_EFFORTS[agent]
-    return CUSTOM_EFFORTS if (_custom_agent(agent) or {}).get("effort_args") else []
+    if not (_custom_agent(agent) or {}).get("effort_args"):
+        return []
+    return ["low", "medium", "high", "xhigh"] if _cli_name(agent) == "grok" else CUSTOM_EFFORTS  # grok's own error lists these
 
 def has_model_choice(agent: str) -> bool:
-    return agent in BUILTIN_AGENTS or bool((_custom_agent(agent) or {}).get("model_args"))
+    custom = _custom_agent(agent) or {}
+    return agent in BUILTIN_AGENTS or bool(custom.get("model_args")) or custom.get("kind") == "api"
 
 def check_pick(agent: str, model: str = "", effort: str = "") -> tuple:
     """Trust boundary: the model becomes a CLI argument (no spaces, no leading dash); effort from that agent's own list."""
@@ -1873,10 +1958,19 @@ def model_flags(agent: str, model: str, effort: str) -> list:
 # ─── Claude guard (Jhon 29 Oct, Max -> Pro): the OS's own background work never eats his Claude limits ────────
 # Background jobs run on a free agent unless settings.json "background" says "claude" for that job; even then Claude
 # only runs while the 5-hour window and the week are under the limits below. Chats Jhon starts himself are never blocked.
-BACKGROUND_JOBS = ("verdict", "self_review", "ticket_plan", "jobs", "fallback")  # scheduled jobs keep their agent, Claude under the guard
+BACKGROUND_JOBS = ("self_review", "ticket_plan", "jobs", "fallback", "check")  # scheduled jobs keep their agent, Claude under the guard
 BACKGROUND_DEFAULT = "hermes"  # free (OpenRouter free models); per-job choice in settings.json "background": {job: agent}
 # the job search reads Jhon's CV and profile: free models may log prompts, so it stays on Claude (under the guard)
-BACKGROUND_PICKS = {"jobs": "claude", "ticket_plan": "opencode"}  # Hermes can't read code (design/free-model-eval.md)
+BACKGROUND_PICKS = {"jobs": "claude", "ticket_plan": "codex", "self_review": "codex", "fallback": "agy", "check": "grok"}
+# Jhon 30 Oct, paid plans on Claude, Codex, Agy and Grok: heavy work gets their top model, light work (checks, backups)
+# a cheap fast one. An agent not listed (the free ones) runs its own default.
+TIER_MODELS = {"heavy": {"claude": ("opus", ""), "codex": ("gpt-6.1-sol", "high"), "grok": ("grok-4.7", "high"), "agy": ("gemini-4-argon-high", "")},
+               "light": {"claude": ("haiku", "low"), "codex": ("gpt-6-luna", "low"), "grok": ("grok-4.7-build-fast", "low"), "agy": ("gemini-3.8-flash-low", "")}}
+JOB_TIERS = {"self_review": "heavy", "ticket_plan": "heavy", "jobs": "heavy", "fallback": "light", "check": "light"}
+
+def tier_args(tier: str, agent: str) -> dict:
+    """{model, effort} for this agent on heavy or light work."""
+    return dict(zip(("model", "effort"), TIER_MODELS[tier].get(agent, ("", ""))))
 GUARD_LIMITS = {"five_hour": 50, "seven_day": 80}  # % used; settings.json "claude_guard" overrides
 _usage_cache = {"at": 0.0, "data": None}
 
@@ -1914,6 +2008,8 @@ def bg_agent(job: str, wanted: str = "claude") -> str:
         return wanted
     sf = BASE_DIR / "data" / "settings.json"
     pick = ((json.loads(sf.read_text()) if sf.exists() else {}).get("background") or {}).get(job, BACKGROUND_PICKS.get(job, BACKGROUND_DEFAULT))
+    if _resting.get(pick, 0) > time.time():  # its plan is gone or it's at its limit
+        return BACKGROUND_DEFAULT
     if pick == "claude" and (why := claude_guard()):
         print(f"[guard] {job}: {why}, using {BACKGROUND_DEFAULT}")
         return BACKGROUND_DEFAULT
@@ -1926,7 +2022,8 @@ def claude_guard_state():
     picked = settings.get("background") or {}
     return {"usage": claude_usage(), "blocked": claude_guard(), "default": BACKGROUND_DEFAULT,
             "limits": {**GUARD_LIMITS, **(settings.get("claude_guard") or {})},
-            "jobs": {j: {"picked": picked.get(j, BACKGROUND_PICKS.get(j, BACKGROUND_DEFAULT)), "now": bg_agent(j)} for j in BACKGROUND_JOBS}}
+            "jobs": {j: {"picked": picked.get(j, BACKGROUND_PICKS.get(j, BACKGROUND_DEFAULT)), "now": bg_agent(j), "tier": JOB_TIERS[j],
+                         "model": " ".join(filter(None, tier_args(JOB_TIERS[j], bg_agent(j)).values()))} for j in BACKGROUND_JOBS}}
 
 # Free tiers run out (OpenCode Zen, OpenRouter's 50 free requests a day): an agent that hits its limit rests until its
 # reset, the next free agent takes the work, and when all are out the caller gets ALL_LIMITED and can come back later.
@@ -1934,6 +2031,10 @@ FREE_AGENTS = ("opencode", "hermes")
 ALL_LIMITED = "All free agents are at their limit"
 LIMIT_RE = re.compile(r"free.?(usage.?)?limit|\b429\b|rate.?limit|quota", re.I)
 _resting: dict = {}  # agent -> time it may be tried again
+# Jhon 30 Oct: a paid agent whose plan ended stops joining work; the free ones (OpenCode's free big models) never sit out for this
+PAID_AGENTS = tuple(TIER_MODELS["heavy"])
+PLAN_GONE_RE = re.compile(r"subscription|plan (has )?(expired|ended)|upgrade (your|to)|not (logged|signed) in|log ?in again|"
+                          r"needs auth|unauthori[sz]ed|\b40[13]\b|payment|billing", re.I)
 
 def _rest_seconds(out: str) -> int:
     """'retry in 10h42m31s' / 'resets at 17:00 (in 2h 55m)' in the error, else an hour."""
@@ -1950,13 +2051,21 @@ def _limited(agent: str, out: str) -> bool:
         _resting[agent] = time.time() + _rest_seconds(out)
         print(f"[agents] {agent} hit its free limit, resting until {datetime.fromtimestamp(_resting[agent]):%H:%M}")
         return True
+    label = ((_custom_agent(agent) or {}).get("label") or agent).lower()
+    failed = out.lower().startswith((f"{agent} failed", f"{label} failed", f"**{agent} needs auth"))  # never a real answer
+    # Claude isn't checked here: background Claude already stops when its login can't read usage (claude_guard)
+    if agent in PAID_AGENTS and failed and PLAN_GONE_RE.search(out[:800]):
+        _resting[agent] = time.time() + 6 * 3600  # sits out; tried again after, so a renewed plan comes back by itself
+        print(f"[agents] {agent}: plan or login gone, sitting out until {datetime.fromtimestamp(_resting[agent]):%H:%M}")
+        append_audit({"action": "plan_gone", "agent": agent, "msg_preview": out[:160]})
+        return True
     return False
 
 # ─── Every agent's limits (Jhon 29 Oct): Billing shows what each agent has left before he picks one ───────────────
 # Claude: claude_usage(). Hermes: OpenRouter's key status (free_model_daily_requests; the key goes to openrouter.ai
 # only). Codex: the newest rate_limits in its session files. OpenCode Zen and agy keep their limits on their servers.
 LIMIT_PLANS = {"claude": "Claude Pro", "hermes": "OpenRouter free models", "opencode": "OpenCode Zen free tier",
-               "codex": "ChatGPT Plus", "agy": "Google Antigravity"}
+               "codex": "ChatGPT Pro", "agy": "Google Antigravity"}
 _limits_cache = {"at": 0.0, "data": {}}
 
 def _utc_midnight() -> float:
@@ -2052,22 +2161,73 @@ def agent_limits_state():
     return agent_limits()
 
 # Workers are read-only (plan modes / safe toolsets): only Jharvis makes changes, with the owner's approval where needed.
-def execute_agent(agent: str, message: str, model: str = "", effort: str = "") -> str:
-    """model / effort: this run's override; "" = the agent's default."""
+def execute_agent(agent: str, message: str, model: str = "", effort: str = "", skip=(), meta: Optional[dict] = None) -> str:
+    """model / effort: this run's override; "" = the agent's default. skip: agents never used as a backup.
+    meta: filled per call with "actual_agent", the one that really answered ("" when none did), since a fallback
+    returns only text (29 Oct: a fallback's answer was saved under the agent that was asked)."""
+    meta = {} if meta is None else meta
+    meta["actual_agent"] = agent
     if _resting.get(agent, 0) <= time.time():
         out = _execute_agent(agent, message, model, effort)
         if not _limited(agent, out):
             return out
-    elif agent not in FREE_AGENTS:
+    elif agent not in FREE_AGENTS and agent not in PAID_AGENTS:
         return _execute_agent(agent, message, model, effort)
     # this free agent is out: the other free ones, then the fallback pick (Claude only if chosen and under the guard)
     for backup in dict.fromkeys([a for a in FREE_AGENTS if a != agent] + [bg_agent("fallback")]):
-        if backup != agent and _resting.get(backup, 0) <= time.time():
+        if backup != agent and backup not in skip and _resting.get(backup, 0) <= time.time():
             print(f"[agents] {agent} is resting, using {backup}")
-            out = _execute_agent(backup, message)
+            meta["actual_agent"] = backup
+            out = _execute_agent(backup, message, **tier_args("light", backup))
             if not _limited(backup, out):
                 return out
+    meta["actual_agent"] = ""
     return f"{ALL_LIMITED} until about {datetime.fromtimestamp(free_again_at()):%H:%M}. Try again then, or pick Claude."
+
+# A reply that is not an answer (Jhon's ticket TKT-0004): agy/opencode exit 0 with a canned "Processed your query" when
+# their file reads are blocked, and run_session would save that as a real answer. Judged on the text, so it also covers
+# failures that arrive as normal-looking replies.
+STUB_RE = re.compile(r"Processed your (query|message)|model returned an empty response|(read|file access)[^.\n]{0,40}denied|permission denied", re.I)
+
+def check_reply(agent: str, out: str, where: str = "") -> str:
+    """'' when the reply is usable, else why not (also logged: error-log.json and the audit log, so the daily review sees it)."""
+    text = (out or "").strip()
+    # shortcut: failures are spotted by their prefix / short canned text; a real answer that merely starts like one is rare
+    if not text:
+        why = "empty reply"
+    elif text.startswith(("⏱", "⚠")) or text.startswith(ALL_LIMITED):
+        why = "failed or timed out"
+    elif re.match(rf"[*\s]*{re.escape(agent)}\b[^\n]{{0,20}}?(failed|timed out|needs (auth|setup)|returned exit code)", text, re.I) \
+            or (len(text) < 700 and re.match(r"[*\s]*[\w .-]{1,40} failed: ", text)):
+        why = "failed or timed out"
+    elif len(text) < 700 and STUB_RE.search(text):
+        why = "stub or read-denied reply"
+    else:
+        return ""
+    log_error(agent, why, "agent", {"where": where, "preview": text[:200]})
+    append_audit({"action": "reply_unverified", "agent": agent, "msg_preview": f"{where}: {why}"[:80]})
+    return why
+
+OPENCODE_SERVICE = Path.home() / ".local" / "state" / "opencode" / "service.json"
+
+def restart_opencode_service() -> bool:
+    """OpenCode 2.x runs one background server; if it booted on a disk I/O error it stays up answering 500, and every
+    run fails with "Background service failed to start" until it's killed (12 Oct, 30 Oct). The next run starts a fresh one."""
+    try:
+        pid = int(json.loads(OPENCODE_SERVICE.read_text(encoding="utf-8"))["pid"])
+        # the image filter: a stale pid reused by another program is left alone
+        subprocess.run(["taskkill", "/F", "/FI", f"PID eq {pid}", "/FI", "IMAGENAME eq opencode*"], capture_output=True, timeout=15)
+        print(f"[agents] restarted opencode's background service (pid {pid})")
+        return True
+    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return False
+
+def hermes_limit_reason(text: str, code: int = 0) -> str:
+    """The provider's limit notice when Hermes's output is one and not an answer, else ''. Only the exact notice counts
+    without an exit code: a streamed answer that merely talks about a "rate limit" is an answer."""
+    if "Your request was not processed" in text or (code != 0 and LIMIT_RE.search(text)):
+        return text.strip()[-400:]
+    return ""
 
 def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") -> str:
     message = AGENT_RULES + message
@@ -2095,7 +2255,10 @@ def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") 
 
         elif agent == "opencode":
             try:
-                code, out, err = run_cli(["opencode", "run", "--format", "json", "--agent", "plan", *flags, fit_argv(message)], timeout=420, cwd=Path(READ_ROOT))
+                oc_args = ["opencode", "run", "--format", "json", "--agent", "plan", *flags, fit_argv(message)]
+                code, out, err = run_cli(oc_args, timeout=420, cwd=Path(READ_ROOT))
+                if "Background service failed to start" in (out or "") + (err or "") and restart_opencode_service():
+                    code, out, err = run_cli(oc_args, timeout=420, cwd=Path(READ_ROOT))  # once, on a fresh service
             except subprocess.TimeoutExpired:
                 return f"⏱ Agent 'opencode' timed out.\n\nOpenCode's model is taking too long. Try running `opencode run \"{message[:60]}\"` directly in your terminal.\n\n**Message:** {message[:100]}"
             if code == 0:
@@ -2134,8 +2297,8 @@ def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") 
                 return f"⏱ Hermes timed out.\n\nThe model took too long to respond. Try a shorter query or check your OpenRouter rate limits.\n\n**Message:** {message[:100]}"
             # a provider limit comes back as a normal-looking reply ("...Your request was not processed") or exit 2 with the
             # notice on stdout: make it a failure so execute_agent moves on to the next free agent
-            if "Your request was not processed" in (out or "") or (code != 0 and LIMIT_RE.search(out or "")):
-                return f"hermes failed: {(out or '').strip()[-400:]}"
+            if reason := hermes_limit_reason(out or "", code):
+                return f"hermes failed: {reason}"
             if code == 0:
                 append_cost("hermes", 0, 0.0, model or "hermes default")
                 cleaned = clean_hermes_output(out or "")
@@ -2150,19 +2313,25 @@ def _execute_agent(agent: str, message: str, model: str = "", effort: str = "") 
 
         elif agent == "agy":
             try:
-                code, out, err = run_cli(["agy", *flags, "--print", fit_argv(message), "--mode", "plan", "--add-dir", READ_ROOT], timeout=420, cwd=AGENT_WORKDIR)
+                # headless agy denies file reads it can't ask about, then prints nothing (29 Oct): allow reads under READ_ROOT only
+                # trailing \ or top-level files are denied; skills it finds point into ~/.claude (never all of it: credentials)
+                reads = json.dumps({"permissions": {"allow": [f"read_file({p}{os.sep})" for p in
+                                    (Path(READ_ROOT), Path.home() / ".claude" / "skills", Path.home() / ".claude" / "plugins")]}})
+                code, out, err = run_cli(["agy", *flags, "--print", fit_argv(message), "--mode", "plan", "--add-dir", READ_ROOT,
+                                          "--settings", reads], timeout=420, cwd=AGENT_WORKDIR)
             except subprocess.TimeoutExpired:
                 return f"**agy timed out.**\n\nTry running `agy --print \"{message[:60]}\"` directly."
             combined = ((err or "") + " " + (out or "")).strip()
             if code == 0:
-                return (out or "").strip() or f"**agy**\n\nProcessed your query."
+                return (out or "").strip() or f"agy failed: {(err or '').strip()[:300] or 'no output'}"
             if "auth" in combined.lower() or "login" in combined.lower() or "api key" in combined.lower():
                 return f"**agy needs auth**\n\nRun `agy login` to authenticate.\n\n**Details:** {combined[:200]}"
             return combined or f"agy returned exit code {code}"
 
         elif custom := _custom_agent(agent):
-            code, out, err = run_custom_agent(custom, message, tuple(flags))
-            append_cost(agent, 0, 0.0, model or custom["label"])  # shortcut: a CLI's own token counts aren't read, only the call
+            code, out, err = (run_api_agent(custom, message, model) if custom.get("kind") == "api"
+                              else run_custom_agent(custom, message, tuple(flags)))
+            append_cost(agent, 0, 0.0, model or custom.get("model") or custom["label"])  # shortcut: a CLI's own token counts aren't read, only the call
             if code == 0 and out.strip():
                 return out.strip()
             return f"{custom['label']} failed: {(err or out or f'exit code {code}').strip()[-600:]}"
@@ -2210,15 +2379,17 @@ def chat(req: ChatRequest):
         clear_chat(agent)
         return {"status": "cleared"}
 
+    cid = current_chat_id(agent)  # taken once: the reply goes to this chat even if Jhon opens another meanwhile
     user_msg = {
         "id": str(uuid.uuid4())[:8],
         "role": "user",
         "agent": agent,
+        "chat": cid,
         "content": message,
         "timestamp": get_timestamp(),
     }
     # Each CLI call starts fresh, so give the agent the recent turns of this chat.
-    recent = [m for m in load_chat_history().get("messages", []) if m.get("agent") == agent][-10:]
+    recent = [m for m in load_chat_history().get("messages", []) if m.get("agent") == agent and (m.get("chat") or cid) == cid][-10:]
     save_chat_message(user_msg)
     context = "\n\n".join(f"[{owner.NAME if m['role'] == 'user' else m.get('by', agent)}]\n{m['content']}" for m in recent)
     prompt = f"Earlier in this chat:\n{context}\n\n{owner.NAME} now says:\n{message}" if context else message
@@ -2229,7 +2400,11 @@ def chat(req: ChatRequest):
     if slash and (BASE_DIR / "skills" / slash[1] / "SKILL.md").exists():
         response_text = run_skill(slash[1], SkillRunRequest(input=slash[2], agent=run_as))["output"]
     else:
-        response_text = execute_agent(run_as, prompt, model, effort)
+        ran = {}
+        response_text = execute_agent(run_as, prompt, model, effort, meta=ran)
+        if (ran.get("actual_agent") or run_as) != run_as:  # a free agent was out and another answered
+            run_as, why = ran["actual_agent"], ("answered because the one you picked was out" if agent != SMART
+                                                else f"{why}; {run_as} was out")
         # Smart always answers (Jhon, 29 Oct): free agents all out -> Codex (his ChatGPT plan), then Claude under the guard
         if agent == SMART and response_text.startswith(ALL_LIMITED):
             for backup in [a for a in ("codex", "claude") if a in AGENTS]:
@@ -2244,9 +2419,10 @@ def chat(req: ChatRequest):
         "id": str(uuid.uuid4())[:8],
         "role": "assistant",
         "agent": agent,
+        "chat": cid,
         "content": response_text,
         "timestamp": get_timestamp(),
-        **({"by": run_as, "why": why} if agent == SMART else {}),
+        **({"by": run_as, "why": why} if agent == SMART or run_as != agent else {}),
     }
     save_chat_message(agent_msg)
 
@@ -2307,7 +2483,7 @@ def hermes_stream(message: str, model: str = "", effort: str = ""):
     with urllib.request.urlopen(urllib.request.Request(f"{HERMES_API}/v1/chat/completions", body, headers), timeout=600) as r:
         if r.headers.get("X-Hermes-Session-Id"):
             HERMES_SESSION_FILE.write_text(r.headers["X-Hermes-Session-Id"])
-        event = ""
+        event, seen = "", ""
         for raw in r:
             line = raw.decode("utf-8", "replace").rstrip("\r\n")
             if line.startswith("event:"):
@@ -2322,6 +2498,9 @@ def hermes_stream(message: str, model: str = "", effort: str = ""):
                 elif d.get("usage"):  # whole run's tokens (several model calls when tools ran); Hermes doesn't say its window
                     yield "context", {"used": d["usage"].get("prompt_tokens", 0) + d["usage"].get("completion_tokens", 0), "window": None}
                 if (text := ((d.get("choices") or [{}])[0].get("delta") or {}).get("content")):
+                    seen += text
+                    if reason := hermes_limit_reason(seen):  # a limit notice is an error, not the reply
+                        raise RuntimeError(reason)
                     yield "text", text
             elif not line:
                 event = ""
@@ -2434,12 +2613,13 @@ def chat_stream(req: ChatRequest):
         clear_chat(agent)
         frames = [{"type": "context", "used": 0, "window": None}, {"type": "cleared"}]
         return StreamingResponse(iter(f"data: {json.dumps(f)}\n\n" for f in frames), media_type="text/event-stream")
-    save_chat_message({"id": str(uuid.uuid4())[:8], "role": "user", "agent": agent, "content": message, "timestamp": get_timestamp()})
+    cid = current_chat_id(agent)  # taken once: the reply goes to this chat even if Jhon opens another meanwhile
+    save_chat_message({"id": str(uuid.uuid4())[:8], "role": "user", "agent": agent, "chat": cid, "content": message, "timestamp": get_timestamp()})
     append_audit({"action": "chat_message", "agent": agent, "msg_preview": message[:50]})
 
     def events():
         sse = lambda d: f"data: {json.dumps(d)}\n\n"
-        text = ""
+        text, failed = "", False
         try:
             for kind, val in CHAT_STREAMS[agent](message, model, effort):
                 if kind == "text":
@@ -2451,13 +2631,14 @@ def chat_stream(req: ChatRequest):
                 else:
                     yield sse({"type": "tool", **val})
         except Exception as e:
+            failed = True
             text += f"\n\n⚠ {label} stopped: {e}"
             yield sse({"type": "error", "error": str(e)})
         finally:  # saved even if the page closes mid-reply
-            msg = {"id": str(uuid.uuid4())[:8], "role": "assistant", "agent": agent,
+            msg = {"id": str(uuid.uuid4())[:8], "role": "assistant", "agent": agent, "chat": cid,
                    "content": text.strip() or f"{label} returned an empty reply.", "timestamp": get_timestamp()}
             save_chat_message(msg)
-            if agent == "hermes":  # Claude's cost is logged from its result line
+            if agent == "hermes" and not failed:  # Claude's cost is logged from its result line
                 append_cost("hermes", 0, 0.0, model or "hermes default")
         yield sse({"type": "done", "message": msg})
 
@@ -2639,16 +2820,36 @@ def session_prompt(agent: str, others: list, messages: list) -> str:
         f"Conversation:\n{transcript}\n\nYour turn:"
     )
 
-def session_verdict(messages: list) -> str:
-    """Jharvis (Opus, high effort, like Jharvis itself) reads the debate and hands Jhon one answer instead of every reply."""
-    debate = "\n\n".join(f"[{m.get('agent') or owner.NAME}]\n{m['content']}" for m in messages)
-    prompt = (f"You are Jharvis, {owner.NAME}'s advisor. His agents just debated what he asked. Read it all and decide "
-              f"what is best for him. Don't summarise each agent. Start with the answer itself, ready to use. Then a "
-              f"line 'Why:' with one or two sentences. If they disagreed on something that matters, end with one line "
-              f"'They disagreed on:'. Plain, short English.\n\nDebate:\n{debate}")
-    if (agent := bg_agent("verdict")) != "claude":
-        return execute_agent(agent, prompt).strip() or "Jharvis couldn't decide this time. Open the debate below."
+def session_verdict(messages: list, meta: Optional[dict] = None, opus: bool = True) -> str:
+    """Jharvis (Opus, high effort, like Jharvis itself) reads the debate and hands Jhon one answer instead of every reply.
+    Not a background job: Jhon started the session, so the guard doesn't apply (29 Oct it had moved this to Hermes, and
+    Codex ended up judging its own plan). Opus judges even when Claude debated (Jhon, 30 Oct). If Opus fails, a free
+    agent that took no part judges instead. meta gets "judge": who actually judged. Replies flagged unverified aren't evidence."""
+    meta = {} if meta is None else meta
+    debaters = {m["agent"] for m in messages if m.get("role") == "agent"}  # actual agents (run_session saves who really ran)
+    letters = {a: f"Answer {chr(65 + i)}" for i, a in enumerate(sorted(debaters))}  # unnamed, so no judge favours a name
+    messages = [m for m in messages if not m.get("unverified")]
+    unusable = sorted(debaters - {m["agent"] for m in messages if m.get("role") == "agent"})  # nothing usable from them
+    if not any(m.get("role") == "agent" for m in messages):
+        return f"No usable answer from: {', '.join(unusable)}. Independent verdict unavailable. Open the debate below."
+    debate = "\n\n".join(f"[{letters.get(m.get('agent'), owner.NAME)}]\n{m['content']}" for m in messages)
+    note = f"\n\nNo usable answer from: {', '.join(unusable)}." if unusable else ""
+    if unusable:
+        debate += f"\n\n(No usable answer from: {', '.join(letters[a] for a in unusable)}. Don't score them.)"
+    prompt = (f"You are Jharvis, {owner.NAME}'s advisor. His agents just answered what he asked. Read every answer and "
+              f"decide what is best for him. Weigh each answer on its evidence (checked facts, file and line references) "
+              f"and keep the strong points from every answer, not just one. When an answer wants to change a rule "
+              f"{owner.NAME} set, don't adopt it: say so. His newer decisions beat older ones. Don't summarise each "
+              f"answer. Talk to him as 'you'. Start with the answer itself, ready to use. Then a line 'Why:' with one "
+              f"or two sentences. Then a 'Scores' table, one row per answer, 1-5 on: Evidence (checked files, facts, "
+              f"line references; claims nobody checked score low), Fits his ask (answers what he asked, keeps his rules), "
+              f"Safe (won't break what works), Small (least new work); a Total; and one short reason per row naming "
+              f"what in that answer earned or lost points. Your decision must follow the scores; say which points you "
+              f"took from which answer. If they disagreed on something that matters, end with one line 'They disagreed "
+              f"on:'. Plain, short English.\n\nAnswers:\n{debate}")
     try:
+        if not opus:
+            raise RuntimeError("background meeting, Claude over its guard")
         code, out, err = run_cli(["claude", "-p", "--output-format", "json", "--model", "opus", "--effort", "high", "--tools", ""],
                                  timeout=900, cwd=AGENT_WORKDIR, answer=prompt)  # prompt on stdin: the debate can be long
         result = json.loads(out)
@@ -2657,9 +2858,22 @@ def session_verdict(messages: list) -> str:
                     "cache_read_input_tokens")), result.get("total_cost_usd", 0.0), "opus (Jharvis verdict)")
         if result.get("is_error") or not result.get("result", "").strip():
             raise RuntimeError(result.get("result") or err)
-        return result["result"].strip()
-    except Exception as e:  # noqa: BLE001 - the debate is still there to read
-        return f"Jharvis couldn't decide this time ({str(e)[:200] or 'no answer'}). Open the debate below."
+        meta["judge"] = "claude"
+        return result["result"].strip() + note
+    except Exception as e:  # noqa: BLE001 - a neutral free agent tries; else the debate is still there to read
+        why = str(e)[:200] or "no answer"
+    judge = next((a for a in dict.fromkeys([bg_agent("check"), *FREE_AGENTS, bg_agent("fallback")])
+                  if a not in debaters and a != "claude" and _resting.get(a, 0) <= time.time()), None)
+    ran, out = {}, ""
+    if judge:
+        out = execute_agent(judge, prompt, **tier_args("light", judge), skip=debaters | {"claude"}, meta=ran).strip()
+    ran = ran.get("actual_agent", judge)
+    if ran in debaters:  # a fallback can swap the judge; the name asked for isn't proof (29 Oct)
+        append_audit({"action": "judge_is_contributor", "agent": ran, "msg_preview": "verdict refused"})
+    elif out and not check_reply(ran or judge, out, "verdict"):
+        meta["judge"] = ran
+        return out + note
+    return f"Jharvis couldn't decide this time (Opus: {why}). Independent verdict unavailable. Open the debate below."
 
 # set from the list's menu / PATCH; a running round must not overwrite them
 SESSION_META = ("title", "pinned", "section", "archived", "overrides")
@@ -2678,41 +2892,68 @@ def save_session(sess: dict):
             sess.update({k: on_disk[k] for k in SESSION_META if k in on_disk})
         write_atomic(f, json.dumps(sess, indent=2))
 
+def session_questions(texts: list) -> list:
+    """The 'QUESTION:' lines of these answers; the same question from several agents (ignoring case and spacing) counts once."""
+    found = {}
+    for text in texts:
+        for line in text.splitlines():
+            q = line.strip().removeprefix("QUESTION:").strip() if line.strip().startswith("QUESTION:") else ""
+            if q:
+                found.setdefault(" ".join(q.lower().split()), q)
+    return list(found.values())
+
 def run_session(sess: dict):
     from concurrent.futures import ThreadPoolExecutor
     agents = sess["agents"]
     start = max(i for i, m in enumerate(sess["messages"]) if m["role"] == "user")  # this run starts at the latest user message
+    rounds = sess.pop("run_rounds", None) or sess["rounds"]  # set by session_message when Jhon answers a pause
+    paused = False
     try:
-        for _ in range(sess["rounds"]):
+        for i in range(rounds):
             sess["round"] += 1
             sess["working"] = list(agents)
             save_session(sess)
             snapshot = list(sess["messages"])
             prompts = {a: session_prompt(a, [o for o in agents if o != a], snapshot) for a in agents}
             picks = sess.get("overrides") or {}
+            def ask(a):  # a per-call meta, not shared: the agents run at once
+                meta = {}
+                return a, execute_agent(a, prompts[a], meta=meta, **picks.get(a, {})), meta
             with ThreadPoolExecutor(len(agents)) as pool:
-                outs = list(pool.map(lambda a: (a, execute_agent(a, prompts[a], **picks.get(a, {}))), agents))
+                outs = list(pool.map(ask, agents))
             all_done = True
-            for agent, out in outs:
+            for asked, out, meta in outs:
+                agent = meta.get("actual_agent") or asked  # who really answered; a fallback is saved under its own name
                 done = out.rstrip().endswith("DONE")
                 all_done &= done
+                why = check_reply(agent, out, f"session {sess['id']}")
                 # shortcut: ~4 characters per token, the size of what this agent was sent this round (each round starts fresh)
-                sess["messages"].append({"role": "agent", "agent": agent, "round": sess["round"], "prompt_tokens": len(AGENT_RULES + prompts[agent]) // 4,
-                                         "content": out.rstrip().removesuffix("DONE").rstrip(), "timestamp": get_timestamp()})
+                sess["messages"].append({"role": "agent", "agent": agent, "round": sess["round"], "prompt_tokens": len(AGENT_RULES + prompts[asked]) // 4,
+                                         "content": out.rstrip().removesuffix("DONE").rstrip(), "timestamp": get_timestamp(),
+                                         **({"requested": asked} if agent != asked else {}), **({"unverified": why} if why else {})})
             sess["working"] = []
+            asked = session_questions([m["content"] for m in sess["messages"] if m.get("round") == sess["round"]
+                                       and m["role"] == "agent" and not m.get("unverified")])
+            if asked:  # wait for Jhon: no next round, no verdict until he answers
+                sess.update(questions=asked, rounds_left=rounds - i - 1)
+                paused = True
             save_session(sess)
-            if all_done:
+            if paused or all_done:
                 break
-        if sess.get("judge"):  # sessions started since 29 Oct; older ones keep showing every reply
+        if sess.get("judge") and not paused:  # sessions started since 29 Oct; older ones keep showing every reply
             sess["judging"] = True
             save_session(sess)
-            sess["messages"].append({"role": "verdict", "agent": "jharvis", "round": sess["round"],
-                                     "content": session_verdict(sess["messages"][start:]), "timestamp": get_timestamp()})
+            judged = {}
+            verdict = session_verdict(sess["messages"][start:], judged, opus=not (sess.get("meeting") and claude_guard()))
+            sess["messages"].append({"role": "verdict", "agent": "jharvis", "round": sess["round"], "content": verdict,
+                                     "timestamp": get_timestamp(), **({"judge": judged["judge"]} if judged.get("judge") else {})})
     finally:  # a crash mid-round must not leave it "running" (every new message would get 409)
         sess["judging"] = False
-        sess["status"] = "idle"
+        sess["status"] = "awaiting_user" if paused else "idle"
         sess["working"] = []
-        sess["read"] = False  # new replies; opening it marks it read
+        last = sess["messages"][-1] if sess["messages"] else {}
+        quiet = sess.get("meeting") and last.get("role") == "verdict" and NOTHING in last["content"][:300]
+        sess["read"] = bool(quiet)  # new replies; opening it marks it read. A meeting with nothing to do doesn't flag him
         save_session(sess)
     append_audit({"action": "session_round", "session": sess["id"], "agents": ",".join(agents)})
 
@@ -2743,6 +2984,39 @@ def session_message(session_id: str, req: SessionMessage):
     if not req.message.strip():
         raise HTTPException(400, "Message cannot be empty")
     sess["messages"].append({"role": "user", "agent": None, "round": sess["round"], "content": req.message.strip(), "timestamp": get_timestamp()})
+    if sess["status"] == "awaiting_user":  # his answer: the rounds that were left (one at least), then the verdict
+        sess["run_rounds"] = max(1, sess.pop("rounds_left", 0))
+    sess["questions"] = []
+    start_session_thread(sess)
+    return sess
+
+class SessionDecision(BaseModel):
+    approve: bool
+    note: str = ""
+
+@app.post("/api/sessions/{session_id}/decision")
+def session_decision(session_id: str, req: SessionDecision):
+    """Jhon on Jharvis's latest verdict (29 Oct). Approve: a pre-approved ticket (plan -> Claude builds -> another agent
+    checks). Deny: his note (or "ask me") goes back to the agents for more rounds and a new verdict to decide on."""
+    sess = get_session(session_id)
+    if sess["status"] == "running":
+        raise HTTPException(409, "Agents are still answering; wait for Jharvis's decision")
+    v = sess["messages"][-1] if sess["messages"] else {}
+    if v.get("role") != "verdict" or v.get("decision"):
+        raise HTTPException(409, "No new decision from Jharvis to approve or deny")
+    if req.approve:
+        asked = next(m["content"] for m in reversed(sess["messages"]) if m["role"] == "user")
+        t = create_ticket(TicketCreate(title=f"Debate: {sess['title']}"[:160], category="change", severity="P2", description=(
+            f"{owner.NAME} approved Jharvis's decision in debate {sess['id']}. Plan and build exactly this, nothing beyond "
+            f"it.\n\nJharvis's decision:\n{v['content']}\n\nHe had asked:\n{asked}")[:20000]))
+        _update_ticket(t["id"], lambda x: x.update(preapproved=sess["id"], pickup_by=get_timestamp()))
+        v["decision"] = {"approved": True, "ticket": t["id"], "at": get_timestamp()}
+        save_session(sess)
+        threading.Thread(target=ticket_tick, daemon=True).start()
+        return sess
+    v["decision"] = {"approved": False, "at": get_timestamp()}
+    sess["messages"].append({"role": "user", "agent": None, "round": sess["round"], "timestamp": get_timestamp(), "content":
+                             req.note.strip()[:10000] or "I deny this decision. Find what's weak in it, fix that, and end with one question for me."})
     start_session_thread(sess)
     return sess
 
@@ -2959,7 +3233,18 @@ def patch_ticket(tid: str, req: TicketPatch):
 def comment_ticket(tid: str, req: TicketComment):
     if not req.text.strip():
         raise HTTPException(400, "Comment cannot be empty")
-    return _update_ticket(tid, lambda t: _ticket_log(t, owner.NAME, req.text.strip()[:4000]))
+    # 30 Oct: Jhon wrote "Try again" on a parked ticket and nothing happened; a retry note on an approved plan builds it again
+    retry = re.search(r"\b(try again|retry|again|redo|re-?run|go ahead|continue)\b", req.text, re.I)
+    def change(t):
+        _ticket_log(t, owner.NAME, req.text.strip()[:4000])
+        if retry and t["status"] == "waiting_on_you" and t.get("plan") and (
+                t.get("preapproved") or any(x["text"] == "Approved the plan" for x in t["log"])):
+            t["status"] = "approved"
+            _ticket_log(t, "Claude", "Building it again, with your note")
+    t = _update_ticket(tid, change)
+    if t["status"] == "approved":
+        threading.Thread(target=ticket_tick, daemon=True).start()
+    return t
 
 @app.post("/api/tickets/{tid}/approve")
 def approve_ticket(tid: str):
@@ -2975,13 +3260,16 @@ def approve_ticket(tid: str):
 
 @app.post("/api/tickets/{tid}/reject")
 def reject_ticket(tid: str, req: TicketComment):
-    """Not this plan: Claude plans again with Jhon's note."""
+    """Not this plan: Claude plans again with Jhon's note. A note that says stop (don't proceed, cancel, drop it...) closes the ticket instead:
+    30 Oct, "Dont proceed" twice only made Claude plan again."""
     def change(t):
         if t["status"] != "awaiting_approval":
             raise HTTPException(409, f"Ticket is {t['status']}, not waiting for approval")
-        t["status"] = "new"
+        note = req.text.strip()[:4000]
+        stop = re.search(r"(?i)\b(don'?t|do not|dont)\s+(proceed|do (it|this)|fix|build|continue)\b|\b(cancel|close (it|this)|drop (it|this)|forget (it|this)|stop|no need|ignore|won'?t fix)\b", note)
+        t["status"] = "closed" if stop else "new"
         t["pickup_by"] = get_timestamp()
-        _ticket_log(t, owner.NAME, "Rejected the plan: " + (req.text.strip()[:4000] or "no note"))
+        _ticket_log(t, owner.NAME, ("Rejected and closed: " if stop else "Rejected the plan: ") + (note or "no note"))
     return _update_ticket(tid, change)
 
 TICKET_FILES = TICKETS_FILE.parent / "files"
@@ -3113,8 +3401,11 @@ def _ticket_prompt(t: dict, stage: str) -> str:
 
 def _run_ticket_claude(t: dict, stage: str) -> str:
     if stage == "plan" and (agent := bg_agent("ticket_plan")) != "claude":  # planning is background; the approved fix stays Claude
-        return execute_agent(agent, _ticket_prompt(t, stage))
-    model = agent_model("claude", "sonnet")
+        out = execute_agent(agent, _ticket_prompt(t, stage), **tier_args("heavy", agent))
+        if why := check_reply(agent, out, f"ticket {t['id']} plan"):  # 30 Oct: opencode's crash text became "the plan" and kept asking for Approve
+            raise RuntimeError(f"{agent} gave no plan ({why}): {out.strip()[:300]}")
+        return out
+    model = tier_args("heavy", "claude")["model"]
     args = ["claude", "-p", "--output-format", "json", "--model", model, "--add-dir", READ_ROOT]  # prompt on stdin
     if stage == "plan":
         args += ["--permission-mode", "plan"]
@@ -3139,6 +3430,19 @@ def _run_ticket_claude(t: dict, stage: str) -> str:
     if result.get("is_error"):
         raise RuntimeError((result.get("result") or "Claude Code reported an error")[:600])
     return (result.get("result") or "").strip()
+
+def _ticket_check(t: dict, out: str) -> tuple:
+    """(checker, its reply): an agent that didn't make the change reads the files and says if the plan was really done."""
+    prompt = (f"Another agent just made a change in {t['project']}. Check it; change nothing.\n\nThe approved plan:\n{t.get('plan', '')}"
+              f"\n\nWhat it says it did:\n{out[-4000:]}\n\nOpen the changed files and run only read-only checks. Was the plan "
+              "really done, and did nothing obvious break? Say what you looked at. The last line is exactly CHECK: PASS or "
+              "CHECK: FAIL (why).")
+    # Claude built it, so never Claude; a checker that's down (30 Oct: opencode 503) hands over to the next one
+    for checker in dict.fromkeys(a for a in (bg_agent("check"), bg_agent("ticket_plan"), "opencode", bg_agent("fallback"), "hermes") if a != "claude"):
+        reply = execute_agent(checker, prompt, **tier_args("light", checker), skip={"claude"}).strip()
+        if not check_reply(checker, reply, "ticket check"):
+            return checker, reply
+    return checker, reply
 
 _ticket_worker_lock = threading.Lock()
 
@@ -3165,6 +3469,13 @@ def ticket_tick():
             ok = True
         except Exception as e:  # noqa: BLE001 - the ticket says what went wrong
             out, ok = f"Claude couldn't finish: {e}", False
+        claims = ok and ((out.rstrip().splitlines() or [""])[-1]).strip().upper().startswith("STATUS: RESOLVED")
+        checker, check = "", ""
+        if stage == "fix" and claims:  # a worker's own RESOLVED never closes a ticket: another agent checks first
+            try:
+                checker, check = _ticket_check(t, out)
+            except Exception as e:  # noqa: BLE001 - no checker, no PASS: parked on Jhon below
+                checker, check = "checker", f"Check couldn't run: {e}"
 
         def done(x):
             moved = x["status"] != t["status"]  # closed, parked or undone during the run: that status stands
@@ -3174,13 +3485,18 @@ def ticket_tick():
                 _ticket_log(x, "Claude", f"Free agents are at their limit; I'll pick it up again after {datetime.fromtimestamp(free_again_at()):%H:%M}")
             elif stage == "plan":
                 x["plan"] = out if ok else x.get("plan", "")
+                pre = ok and x.get("preapproved")  # Jhon approved the debate's decision: building starts without a second Approve
                 if not moved:
-                    x["status"] = "awaiting_approval" if ok else "waiting_on_you"
-                _ticket_log(x, "Claude", "Plan ready for your Approve" if ok else out)
+                    x["status"] = "approved" if pre else "awaiting_approval" if ok else "waiting_on_you"
+                _ticket_log(x, "Claude", f"Plan ready; you approved it in debate {pre}, building it next" if pre
+                            else "Plan ready for your Approve" if ok else out)
             else:
                 x["result"] = out
-                last = (out.rstrip().splitlines() or [""])[-1]  # an empty reply has no last line
-                resolved = ok and last.strip().upper().startswith("STATUS: RESOLVED")
+                resolved = claims
+                if checker:
+                    x["check"] = check
+                    resolved = ((check.rstrip().splitlines() or [""])[-1]).strip().upper().startswith("CHECK: PASS")
+                    _ticket_log(x, checker, "Checked the change: PASS" if resolved else "Check failed or couldn't run: see the check")
                 if not moved:
                     x["status"] = "resolved" if resolved else "waiting_on_you"
                 _ticket_log(x, "Claude", "Resolved" if resolved else "Needs you: see the result")
@@ -3202,10 +3518,312 @@ def tickets_mark_interrupted():
         if stuck:
             _save_tickets(items)
 
+# ─── Keys (Jhon 30 Oct): API keys the OS's own code uses (Zernio for posting). Write-only: never sent back. ────────
+SECRETS_FILE = BASE_DIR / "config" / "secrets.json"  # gitignored
+
+def secret(name: str) -> str:
+    return (json.loads(SECRETS_FILE.read_text(encoding="utf-8")) if SECRETS_FILE.exists() else {}).get(name, "")
+
+class SecretValue(BaseModel):
+    value: str
+
+@app.get("/api/secrets")
+def secrets_list():
+    names = json.loads(SECRETS_FILE.read_text(encoding="utf-8")) if SECRETS_FILE.exists() else {}
+    known = {"ZERNIO_API_KEY": "Zernio (posts to your Instagram)", "GMAIL_USER": "Gmail address (Upwork invites, Indeed alerts)",
+             "GMAIL_APP_PASSWORD": "Gmail app password (reads those emails only)"}
+    return {"keys": {**known, **{k: k for k in names if k not in known}},
+            "set": [k for k, v in names.items() if v]}
+
+@app.put("/api/secrets/{name}")
+def secrets_set(name: str, req: SecretValue):
+    validate_identifier(name, r"^[A-Z][A-Z0-9_]{2,40}$", "key name")
+    with _job_files_lock:
+        data = json.loads(SECRETS_FILE.read_text(encoding="utf-8")) if SECRETS_FILE.exists() else {}
+        data[name] = req.value.strip()[:500]
+        SECRETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        write_atomic(SECRETS_FILE, json.dumps(data, indent=2))
+    append_audit({"action": "secret_set", "agent": "owner", "msg_preview": name})  # the name only, never the value
+    return {"set": bool(data[name])}
+
+# ─── Designated agents (Jhon 30 Oct): Team page crews with an advisor / helper, each on its own model ─────────────
+ACTIONS = {"": "Just answer (no outward action)", "ig_carousel": "Instagram carousel: render the slides and post via Zernio",
+           "linkedin_post": "LinkedIn post: post the agent's text via Zernio"}
+
+class CrewRole(BaseModel):
+    agent: str
+    model: str = ""
+    effort: str = ""
+
+class CrewRequest(BaseModel):
+    name: str
+    task: str
+    skills: list[str] = []
+    agent: CrewRole
+    advisor: Optional[CrewRole] = None
+    helper: Optional[CrewRole] = None
+    action: str = ""
+    schedule: str = ""  # cron; "" = run by hand
+    approve_first: int = 3
+
+def _check_role(r: Optional[CrewRole]) -> Optional[dict]:
+    if r is None or not r.agent:
+        return None
+    if r.agent not in AGENTS:
+        raise HTTPException(400, f"Unknown agent {r.agent}")
+    model, effort = check_pick(r.agent, r.model, r.effort)
+    return {"agent": r.agent, "model": model, "effort": effort}
+
+@app.get("/api/crews")
+def crews_list():
+    return {"crews": crews.load(), "actions": ACTIONS}
+
+@app.post("/api/crews")
+def crews_create(req: CrewRequest):
+    name, task = req.name.strip(), req.task.strip()
+    if not 1 <= len(name) <= 60 or not 1 <= len(task) <= 4000 or req.action not in ACTIONS:
+        raise HTTPException(400, "Name 1-60 characters, task 1-4000, and a known action")
+    c = crews.create({"name": name, "task": task, "skills": [s for s in req.skills if s][:8], "agent": _check_role(req.agent),
+                      "advisor": _check_role(req.advisor), "helper": _check_role(req.helper), "action": req.action,
+                      "schedule": req.schedule.strip(), "approve_first": max(0, min(req.approve_first, 20))})
+    if c["schedule"]:
+        try:
+            create_job(ScheduleJobRequest(name=re.sub(r"[^a-zA-Z0-9 _-]", "", f"Agent {name}")[:60], cron=c["schedule"], kind="crew", prompt=c["id"]))
+        except HTTPException as e:
+            crews.update(c["id"], lambda x: x.update(schedule=""))
+            raise HTTPException(400, f"Agent saved, but not its schedule: {e.detail}")
+    append_audit({"action": "crew_created", "agent": c["agent"]["agent"], "msg_preview": name})
+    return c
+
+@app.delete("/api/crews/{cid}")
+def crews_delete(cid: str):
+    with crews.LOCK:
+        items = crews.load()
+        if not any(c["id"] == cid for c in items):
+            raise HTTPException(404, "No such agent")
+        crews.save([c for c in items if c["id"] != cid])
+    return {"deleted": cid}
+
+def _crew_action(c: dict, r: dict, out: str) -> dict:
+    if c.get("action") == "linkedin_post":
+        text = re.sub(r"^```\w*\n|\n```$", "", out.strip()).strip()
+        if not text:
+            raise RuntimeError("The agent wrote no post")
+        img = (r.get("brief") or {}).get("image")
+        if img:  # the owner's picture goes on the post as its one image (a PNG; post() uploads PNGs)
+            out_dir = crews.RUNS_DIR / c["id"] / r["id"]
+            out_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(img, out_dir / "slide0.png")
+        return {"post": {"caption": text[:3000]}, "slides": 1 if img else 0}
+    if c.get("action") != "ig_carousel":
+        return {}
+    post = ig_carousel.parse(out)
+    post["slides"] = [s for s in post["slides"] if ig_carousel.repo_exists(s.get("repo", ""))]  # no made-up repos
+    if len(post["slides"]) < 3:
+        raise RuntimeError("Fewer than 3 of the agent's repos exist on GitHub, so nothing was made")
+    post["cover"]["number"] = str(len(post["slides"]))
+    handle = c.get("ig_handle") or ""
+    missing = lambda h: h.strip().lower() in ("", "you")  # 30 Oct: a missing handle was rendered, and posted, as @YOU
+    if missing(handle) and (key := secret("ZERNIO_API_KEY")):
+        try:
+            a = ig_carousel.instagram_account(key)
+            if not missing(a.get("username") or ""):
+                handle = a["username"]
+                crews.update(c["id"], lambda x: x.update(ig_handle=handle, ig_account=a["_id"]))
+        except (OSError, RuntimeError, KeyError, ValueError):
+            pass
+    if missing(handle):
+        raise RuntimeError("Instagram handle didn't load")
+    slides = ig_carousel.render(post, crews.RUNS_DIR / c["id"] / r["id"], handle)
+    ig_carousel.render_story(crews.RUNS_DIR / c["id"] / r["id"], handle)  # posted as a Story right after the carousel
+    return {"post": post, "slides": len(slides)}
+
+AGENT_NOTES = re.compile(r"\b(I'll|I will|let me) (check|read|verify|confirm|look|lock|search)\b|\bpost is (up|written)\b|"
+                         r"\b(advisor|helper)'s\b", re.I)
+
+def post_problem(text: str) -> str:
+    """Why a post must not go out on its own (31 Oct: an auto-post opened "Jhon, I'll check Anthropic's write-up...")."""
+    first = owner.NAME.split()[0]
+    if owner.NAME != "the owner" and re.search(rf"\b{re.escape(first)}\b", text, re.I):
+        return f"it mentions {first}"
+    if AGENT_NOTES.search(text):
+        return "it has the agent's own notes in it"
+    return ""
+
+def _crew_after(cid: str, rid: str):
+    c = crews.get(cid)
+    r = next(x for x in c["runs"] if x["id"] == rid)
+    if why := post_problem((r.get("post") or {}).get("caption", "")):  # held for his Approve instead
+        crews.update_run(cid, rid, error=f"Not posted on its own: {why}. Edit or deny it.")
+        return
+    if c["approved"] >= c.get("approve_first", 3):  # he approved enough of them: it runs on its own now
+        try:
+            crew_decide(cid, rid, True, auto=True)
+        except HTTPException:  # the post failed: it waits in Approvals with the error instead
+            pass
+
+def start_crew_run(cid: str) -> str:
+    c = crews.get(cid)
+    return crews.run(cid, lambda a, p, m, e: execute_agent(a, p, m, e), _crew_action, _crew_after,
+                     {"ig_carousel": ig_carousel.FORMAT, "linkedin_post": ig_carousel.LINKEDIN_FORMAT}.get(c.get("action"), ""),
+                     (lambda x: ig_carousel.popular_repos(x.get("used_repos", []), crews.RUNS_DIR / "repos.json"))
+                     if c.get("action") == "ig_carousel" else None)
+
+@app.post("/api/crews/{cid}/run")
+def crews_run(cid: str):
+    try:
+        return {"run": start_crew_run(cid)}
+    except KeyError:
+        raise HTTPException(404, "No such agent")
+
+@app.get("/api/crews/{cid}/runs/{rid}/slide/{n}")
+def crews_slide(cid: str, rid: str, n: int):
+    from fastapi.responses import FileResponse
+    validate_identifier(cid, r"^[0-9a-f-]{8}$", "agent id")
+    validate_identifier(rid, r"^[0-9a-f-]{8}$", "run id")
+    f = crews.RUNS_DIR / cid / rid / f"slide{n}.png"
+    if not f.exists():
+        raise HTTPException(404, "No such slide")
+    return FileResponse(f, media_type="image/png")
+
+def crew_decide(cid: str, rid: str, yes: bool, auto: bool = False) -> dict:
+    c = crews.get(cid)
+    r = next((x for x in c["runs"] if x["id"] == rid), None)
+    if not r or r["status"] != "awaiting_approval":
+        raise HTTPException(409, "Already answered")
+    if not yes:
+        return crews.update_run(cid, rid, status="denied")
+    crews.update_run(cid, rid, status="posting" if r.get("post") else "approved", auto=auto)
+    if r.get("post"):
+        try:
+            key = secret("ZERNIO_API_KEY")
+            if not key:
+                raise RuntimeError("No Zernio key yet: add it under Agents & tools > Keys")
+            platform = "linkedin" if c.get("action") == "linkedin_post" else "instagram"
+            acct = (c.get("ig_account") if platform == "instagram" else None) or ig_carousel.account(key, platform)["_id"]
+            slides = [crews.RUNS_DIR / cid / rid / f"slide{n}.png" for n in range(r["slides"])]
+            res = ig_carousel.post(key, acct, slides, r["post"]["caption"], platform)
+        except Exception as e:  # noqa: BLE001 - kept on the run; he can Approve again once it's fixed
+            crews.update_run(cid, rid, status="awaiting_approval", error=f"Post failed: {str(e)[:500]}")
+            raise HTTPException(502, f"Not posted: {str(e)[:300]}")  # the Approve button shows why (30 Oct it looked like nothing happened)
+        append_audit({"action": "crew_posted", "agent": c["agent"]["agent"], "msg_preview": f"{c['name']} {rid}"})
+        crews.update_run(cid, rid, status="posted", result=json.dumps(res)[:2000])
+        if platform == "instagram":
+            repos = [x["repo"] for x in r["post"].get("slides", [])]
+            crews.update(cid, lambda x: x.update(used_repos=(x.get("used_repos", []) + repos)[-300:]))  # never posted twice
+            threading.Thread(target=_comment_dm, args=(cid, rid, key, (res.get("post") or {}).get("_id", ""),
+                             c.get("ig_handle") or "", r["post"].get("slides", [])), daemon=True).start()
+            story =crews.RUNS_DIR / cid / rid / "story.png"
+            try:  # Jhon 30 Oct: a Story of each post; a failed Story doesn't undo the post
+                if story.exists():
+                    crews.update_run(cid, rid, story=json.dumps(ig_carousel.post(key, acct, [story], "", "instagram", story=True))[:500])
+            except Exception as e:  # noqa: BLE001
+                crews.update_run(cid, rid, story=f"Story failed: {str(e)[:300]}")
+    else:
+        crews.update_run(cid, rid, status="approved")
+    if not auto:  # only an approval that went through counts toward "approve the first N"
+        crews.update(cid, lambda x: x.update(approved=x["approved"] + 1))
+    return next(x for x in crews.get(cid)["runs"] if x["id"] == rid)
+
+def _comment_dm(cid: str, rid: str, key: str, post_id: str, handle: str, slides: list):
+    """Comment "AI" -> follow first -> DM with the repo links (Zernio comment automation). A failure stays on the run."""
+    try:
+        if not post_id:
+            raise RuntimeError("Zernio sent back no post id")
+        res = ig_carousel.comment_dm(key, post_id, handle, slides)
+        crews.update_run(cid, rid, comment_dm=json.dumps(res)[:500])
+        append_audit({"action": "comment_dm_on", "agent": "zernio", "msg_preview": f"{cid} {rid}"})
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if isinstance(e, urllib.error.HTTPError):
+            msg = f"{e.code} {e.read()[:300].decode(errors='replace')}"
+        crews.update_run(cid, rid, comment_dm=f"Comment-DM failed: {msg[:400]}")
+        log_error("zernio", "comment-DM setup failed", "crew", {"run": rid, "preview": msg[:200]})
+
+def tidy_loop():
+    while True:
+        try:
+            if tidy.due():
+                tidy.scan()
+        except Exception as e:  # noqa: BLE001 - tried again next hour
+            print(f"[tidy] scan failed: {e}")
+        time.sleep(3600)
+
+@app.get("/api/tidy")
+def tidy_state():
+    return tidy.load()
+
+@app.post("/api/tidy/scan")
+def tidy_scan_now():
+    threading.Thread(target=tidy.scan, daemon=True).start()
+    return {"started": True}
+
+@app.post("/api/tidy/{cid}/undo")
+def tidy_undo(cid: str):
+    try:
+        c = tidy.undo(cid)
+    except KeyError:
+        raise HTTPException(404, "Nothing moved for that card")
+    except FileExistsError:
+        raise HTTPException(409, "Something is back in its old place already; move it by hand")
+    append_audit({"action": "tidy_undo", "agent": "jharvis", "msg_preview": c["rel"]})
+    return c
+
+# ─── Daily meeting room (Jhon 30 Oct): the agents meet on their own, pitch and argue about improving the OS, and ──
+# Jharvis's verdict waits in Approvals. Approve = a ticket that gets built; Deny = dropped. NOTHING TO DO = no flag.
+MEETING_FILE = BASE_DIR / "data" / "meeting.json"
+NOTHING = "NOTHING TO DO"
+
+def _meeting_due() -> bool:
+    m = json.loads(MEETING_FILE.read_text(encoding="utf-8")) if MEETING_FILE.exists() else {}
+    return not m.get("last") or datetime.fromisoformat(m["last"]).timestamp() < time.time() - 24 * 3600
+
+def meeting_agents() -> list:
+    """The paid agents whose plan works (not sitting out), Claude only under the guard, plus free OpenCode. With Opus
+    out, the "check" agent sits out to judge: a judge never debates, and free Hermes timed out judging (30 Oct)."""
+    agents = [a for a in (*PAID_AGENTS, "opencode") if a in AGENTS and _resting.get(a, 0) <= time.time()
+              and not (a == "claude" and claude_guard())]
+    judge = bg_agent("check")
+    return [a for a in agents if a != judge] if "claude" not in agents and judge in agents and len(agents) > 2 else agents
+
+def _meeting_sessions() -> list:
+    out = []
+    for f in sorted(SESSION_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:60] if SESSION_DIR.exists() else []:
+        try:
+            sess = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if sess.get("meeting") and sess.get("messages") and sess.get("status") != "running":
+            out.append(sess)
+    return out
+
+def start_meeting() -> Optional[str]:
+    write_atomic(MEETING_FILE, json.dumps({"last": get_timestamp()}))  # one a day, even when it can't run
+    agents = meeting_agents()
+    if len(agents) < 2:
+        print(f"[meeting] skipped: only {agents} can join")
+        return None
+    open_titles = [t["title"] for t in _tickets() if t["status"] != "closed"][-40:]
+    message = (f"Daily meeting: how should {owner.NAME}'s Agentic OS (you, his agents) get better? Each of you pitch the ONE "
+               "change that helps him most: less babysitting, fewer failures, lower cost, or a new automation he'd really use. "
+               "Back it with evidence from the logs below or the code (file and line). Then weigh the others' pitches and "
+               f"agree on the best one. Small and safe beats big. Never change a rule {owner.NAME} set, and never propose "
+               "commits, pushes, posting or spending money. Skip what an open ticket already covers: " + json.dumps(open_titles)[:1500]
+               + f"\nIf nothing is worth his time, the answer is exactly {NOTHING}.\n\nWhat happened lately:" + _os_evidence(60, 30, 2000, cap=2500))
+    sess = {"id": str(uuid.uuid4())[:8], "title": f"Daily meeting {datetime.now():%d %b}", "agents": agents, "meeting": True,
+            "overrides": {a: {k: v for k, v in tier_args("heavy", a).items() if v} for a in agents},
+            "rounds": 2, "round": 0, "working": [], "created": get_timestamp(), "judge": True,
+            "messages": [{"role": "user", "agent": None, "round": 0, "content": message[:10000], "timestamp": get_timestamp()}]}
+    start_session_thread(sess)
+    append_audit({"action": "meeting_started", "session": sess["id"], "agents": ",".join(agents)})
+    return sess["id"]
+
 def ticket_worker_loop():
     while True:
         try:
             ticket_tick()
+            if _meeting_due():
+                start_meeting()
             if _review_due():
                 self_review()
         except Exception as e:  # noqa: BLE001 - keep the worker alive
@@ -3218,8 +3836,9 @@ def ticket_worker_loop():
 
 REVIEW_FILE = BASE_DIR / "data" / "self-review.json"
 REVIEW_SCHEMA = {"type": "object", "required": ["findings"], "properties": {"findings": {"type": "array", "maxItems": 3, "items": {
-    "type": "object", "required": ["title", "description", "severity", "category"],
+    "type": "object", "required": ["title", "description", "severity", "category", "check"],
     "properties": {"title": {"type": "string"}, "description": {"type": "string"},
+                   "check": {"type": "string", "description": "the regression check that proves the fix works"},
                    "severity": {"enum": ["P2", "P3", "P4"]}, "category": {"enum": list(TICKET_CATEGORIES)},
                    "project": {"type": "string"}}}}}}
 
@@ -3231,6 +3850,22 @@ def _review_due() -> bool:
     busy = any(t["status"] in ("planning", "in_progress") for t in _tickets())
     return not busy and (not last or datetime.fromisoformat(last).timestamp() < time.time() - 24 * 3600)
 
+def _error_digest(n: int = 100) -> list:
+    """The tail of error-log.json with the same agent + reason folded into one row, so one cause is one ticket."""
+    rows: dict = {}
+    for e in (json.loads(ERROR_LOG_FILE.read_text())[-n:] if ERROR_LOG_FILE.exists() else []):
+        k = (e["source"], e["message"])
+        rows[k] = rows.get(k, 0) + 1
+    return [{"agent": s, "reason": m, "count": c} for (s, m), c in rows.items()]
+
+def _os_evidence(audit: int, server_log: int, tickets: int = 6000, cap: int = 0) -> str:
+    """The newest audit + server log lines and tickets: what a review or meeting reads (both paths, the same evidence)."""
+    # cap: chars per log, newest kept, so a busy audit log can't crowd out the rest (the meeting's prompt is cut at 10K)
+    tail = lambda p, n: "\n".join(p.read_text(encoding="utf-8", errors="replace").splitlines()[-n:])[-cap:] if p.exists() else "(none)"
+    return ("\n--- audit.log ---\n" + tail(BASE_DIR / "audit" / "audit.log", audit) + "\n--- server.log ---\n"
+            + tail(BASE_DIR / "data" / "server.log", server_log) + "\n--- tickets ---\n"
+            + json.dumps([{k: t.get(k) for k in ("title", "status", "result")} for t in _tickets()][-30:])[:tickets])
+
 def _by_review(t: dict):
     t["reporter"] = t["log"][0]["who"] = "Claude (self-review)"
 
@@ -3240,25 +3875,25 @@ def self_review() -> dict:
     open_titles = [t["title"] for t in _tickets() if t["status"] != "closed"][-40:]
     prompt = (
         f"You review {owner.NAME}'s Agentic OS for friction, like a careful IT engineer after a shift. Look only at what "
-        f"happened since {since} (UTC). Read: {(BASE_DIR / 'audit' / 'audit.log').as_posix()} (one JSON per line), the "
-        f"end of {(BASE_DIR / 'data' / 'server.log').as_posix()}, {TICKETS_FILE.as_posix()} (rejected plans, undone "
+        f"happened since {since} (UTC). The newest lines of the audit log (one JSON per line), the server log and the "
+        "tickets are at the end of this message (rejected plans, undone "
         "fixes and NEEDS JHON results are the strongest signals). Find repeated failures, errors, slow or wasted runs, "
         "and things he had to fix by hand. For each, find the cause in the code if you can.\n"
+        "Replies flagged unverified (stub, read-denied, failed or timed-out answers), same agent + reason folded into "
+        "one row: " + json.dumps(_error_digest()) + ". The same agent with the same reason is ONE finding. Each finding "
+        "names the check that proves its fix.\n"
         "Report at most 3 findings worth a ticket, most valuable first; an empty list is a good answer when nothing "
         "stands out. Skip anything already covered by these open tickets: " + json.dumps(open_titles) + "\n"
         "If a skill keeps doing badly, say so and suggest a SkillOpt run (`skillopt-sleep`, it keeps a change only if "
         "it scores better); never propose editing skill files by hand. Severity: P2 broken now, P3 annoying, P4 small. "
         "project = the folder the fix belongs in (empty = the OS). Plain English, short.")
-    model = agent_model("claude", "sonnet")
+    prompt += "\n\nThese tails are the whole log input. Do not open the log files for more." + _os_evidence(150, 80)
+    model = tier_args("heavy", "claude")["model"]
     agent = bg_agent("self_review")
     opened, problem, out, err = [], None, "", ""
     try:
-        if agent != "claude":  # free agents can't open files: the recent logs go in the prompt
-            tail = lambda p, n: "\n".join(p.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]) if p.exists() else "(none)"
-            out = execute_agent(agent, prompt + "\n\nThe files, newest lines:\n--- audit.log ---\n" + tail(BASE_DIR / "audit" / "audit.log", 150)
-                                + "\n--- server.log ---\n" + tail(BASE_DIR / "data" / "server.log", 80) + "\n--- tickets ---\n"
-                                + json.dumps([{k: t.get(k) for k in ("title", "status", "result")} for t in _tickets()][-30:])[:6000]
-                                + "\n\nAnswer with only JSON matching this schema: " + json.dumps(REVIEW_SCHEMA))
+        if agent != "claude":  # free agents can't open files at all
+            out = execute_agent(agent, prompt + "\n\nAnswer with only JSON matching this schema: " + json.dumps(REVIEW_SCHEMA), **tier_args("heavy", agent))
             findings = (pipeline.first_json(out, "{") or {}).get("findings")
             if not isinstance(findings, list):
                 raise RuntimeError(f"{agent} gave no findings JSON")
@@ -3272,10 +3907,15 @@ def self_review() -> dict:
             append_cost("claude", sum(result.get("usage", {}).get(k, 0) for k in ("input_tokens", "output_tokens",
                         "cache_creation_input_tokens", "cache_read_input_tokens")), result.get("total_cost_usd", 0.0), model)
             findings = (result.get("structured_output") or {}).get("findings", [])
+        seen = {t["title"].strip().lower() for t in _tickets() if t["status"] != "closed"}  # an open ticket already covers it
         for f in [f for f in findings if isinstance(f, dict) and f.get("title") and f.get("severity") in ("P2", "P3", "P4")
                   and f.get("category") in TICKET_CATEGORIES][:3]:
+            if f["title"][:160].strip().lower() in seen:
+                continue
+            seen.add(f["title"][:160].strip().lower())
             project = f.get("project", "").strip()
-            t = create_ticket(TicketCreate(title=f["title"][:160], description=str(f.get("description", ""))[:20000], category=f["category"],
+            check = f"\n\nCHECK: {f['check']}" if f.get("check") else ""
+            t = create_ticket(TicketCreate(title=f["title"][:160], description=(str(f.get("description", "")) + check)[:20000], category=f["category"],
                                            severity=f["severity"], project=project if project and Path(project).is_dir() else ""))
             _update_ticket(t["id"], _by_review)
             opened.append(t["id"])
@@ -3719,7 +4359,8 @@ class CustomAgentRequest(BaseModel):
 def list_agents():
     builtin = [{"id": a, "label": {"claude": "Claude Code", "opencode": "OpenCode", "hermes": "Hermes", "agy": "agy"}[a],
                 "role": TEAM_ROLES[a], "builtin": True} for a in BUILTIN_AGENTS]
-    return {"agents": builtin + [{**a, "builtin": False, "command": " ".join(a["command"]),
+    return {"agents": builtin + [{**a, "builtin": False, "command": " ".join(a["command"]) if "command" in a
+                                  else f"{API_PROVIDERS[a['provider']][0]} · {a['model']}",
                                   "logo": next((f.name for f in AGENT_LOGOS.glob(f"{a['id']}.*")), None)} for a in custom_agents()]}
 
 @app.post("/api/agents")
@@ -3752,11 +4393,137 @@ def add_agent(req: CustomAgentRequest, request: Request):
         raise HTTPException(400, "Test failed: no answer within the time limit")
     if code != 0 or "hello" not in out.lower():
         raise HTTPException(400, f"Test failed (exit {code}): {(err or out or 'no output').strip()[-400:]}")
+    _save_agent(agent)
+    append_audit({"action": "agent_added", "agent": req.id, "msg_preview": " ".join(command)[:60]})
+    return {**agent, "test_answer": out.strip()[:200], "logo": find_agent_logo(agent)}
+
+def _save_agent(agent: dict):
     CUSTOM_AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_atomic(CUSTOM_AGENTS_FILE, json.dumps(custom_agents() + [agent], indent=2))
     load_custom_agents()
-    append_audit({"action": "agent_added", "agent": req.id, "msg_preview": " ".join(command)[:60]})
-    return {**agent, "test_answer": out.strip()[:200], "logo": find_agent_logo(agent)}
+
+def _new_agent_id(label: str) -> str:
+    """From the name, e.g. 'DeepSeek V4' -> deepseek-v4; -2, -3... when taken."""
+    base = (re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or "agent")[:20].strip("-")
+    base = base if re.fullmatch(r"[a-z][a-z0-9-]{1,23}", base) else f"ai-{base}"[:20].strip("-")
+    aid, n = base, 2
+    while aid in BUILTIN_AGENTS or _custom_agent(aid):
+        aid, n = f"{base}-{n}", n + 1
+    return aid
+
+# Sign-in apps (Jhon 29 Oct: one tap, no commands). Fixed read-only commands, so a tap from the phone is safe:
+# id -> label, role, install, command, login (opens on the PC), model flag, effort flag
+# Only apps with a free/subscription sign-in (29 Oct research): Gemini CLI and Qwen Code dropped free logins (use the
+# API key way), droid wants an API key in scripts, Kimi's print mode auto-approves tools. Copilot / Cursor flags are
+# from their docs, not run here yet; the hello test still has to pass before one is added.
+AGENT_CATALOG = {
+    "codex": ("Codex", "Second opinion on code and plans (OpenAI)", "npm install -g @openai/codex",
+              "codex exec --sandbox read-only --skip-git-repo-check --color never -", "codex login",
+              "-m {model}", "-c model_reasoning_effort={effort}"),
+    "copilot": ("GitHub Copilot", "Code questions on your GitHub Copilot plan", "npm install -g @github/copilot",
+                "copilot -s --no-color --no-ask-user --available-tools=view,grep,glob,web_fetch,web_search "
+                "--deny-tool=shell --deny-tool=write", "copilot login", "--model {model}", "--effort {effort}"),
+    # Grok Build 1.0.70, installed to D:\Tools\grok\bin 30 Oct (full path: the server's PATH predates it). Cursor's tile
+    # was dropped: Grok installs its own agent.exe, the same name Cursor's CLI uses.
+    "grok": ("Grok", "Answers and research on your SuperGrok plan (xAI)",
+             "powershell -NoProfile -Command \"$env:GROK_BIN_DIR='D:\\Tools\\grok\\bin'; irm https://x.ai/cli/install.ps1 | iex\"",
+             r"D:\Tools\grok\bin\grok.exe --permission-mode plan --output-format plain -p {prompt}",
+             r"D:\Tools\grok\bin\grok.exe login", "-m {model}", "--effort {effort}"),
+}
+
+@app.get("/api/agent-catalog")
+def agent_catalog():
+    return {"catalog": [{"id": i, "label": c[0], "installed": bool(shutil.which(c[3].split()[0])), "added": bool(_custom_agent(i)),
+                         "note": c[1]} for i, c in AGENT_CATALOG.items()]}
+
+def _open_on_pc(title: str, cmd: str):
+    subprocess.Popen(["cmd", "/c", "start", title, "cmd", "/k", cmd], cwd=str(AGENT_WORKDIR))
+
+@app.post("/api/agent-catalog/{cid}")
+def add_catalog_agent(cid: str):
+    """Installed and signed in -> tested and added. Otherwise opens install + sign-in on the PC; Jhon taps again after."""
+    if cid not in AGENT_CATALOG:
+        raise HTTPException(404, "Unknown app")
+    if _custom_agent(cid):
+        raise HTTPException(409, "Added already")
+    label, role, install, command, login, model_args, effort_args = AGENT_CATALOG[cid]
+    if not shutil.which(command.split()[0]):
+        _open_on_pc(f"Install {label}", f"echo Installing {label}, then its sign-in starts. && {install} && {login}")
+        append_audit({"action": "agent_install", "agent": cid})
+        return {"status": "opened", "text": f"Installing {label} on the PC. Sign in in the window that opens there, then tap {label} again."}
+    agent = {"id": cid, "label": label, "role": role, "command": split_command(command), "timeout": 600, "relogin": login,
+             "created": get_timestamp(), "model_args": model_args, "effort_args": effort_args}
+    try:
+        code, out, err = run_custom_agent({**agent, "timeout": 180}, "Reply with exactly one word: hello")
+    except subprocess.TimeoutExpired:
+        code, out, err = 1, "", "timed out"
+    except ValueError as e:  # {prompt} into a .cmd wrapper: refused, see prompt_in_batch
+        raise HTTPException(400, f"{label} can't be run safely this way: {e}")
+    if code != 0 or "hello" not in out.lower():
+        # a stub that isn't the real CLI (VS Code's copilot shim) fails the test too: install again, then sign in
+        _open_on_pc(f"Sign in to {label}", f"echo Sign in to {label}, then close this window. && {install} && {login}")
+        append_audit({"action": "agent_login", "agent": cid})
+        return {"status": "opened", "text": f"{label} isn't signed in yet. A sign-in window opened on the PC: finish it, then tap {label} again."}
+    _save_agent(agent)
+    append_audit({"action": "agent_added", "agent": cid, "msg_preview": command[:60]})
+    find_agent_logo(agent)
+    return {"status": "added", "test_answer": out.strip()[:200]}
+
+class ProviderKey(BaseModel):
+    key: str = ""  # empty = the saved one
+
+class ApiAgentRequest(BaseModel):
+    provider: str
+    model: str
+    key: str = ""  # empty = the saved one
+    label: str = ""  # empty = the model's name
+    role: str = ""
+
+@app.get("/api/agent-providers")
+def agent_providers():
+    return {"providers": [{"id": p, "label": label, "keys_url": url, "has_key": bool(secret(provider_key_name(p)))}
+                          for p, (label, _, url) in API_PROVIDERS.items()]}
+
+@app.post("/api/agent-providers/{provider}/models")
+def agent_provider_models(provider: str, req: ProviderKey):
+    if provider not in API_PROVIDERS:
+        raise HTTPException(404, "Unknown company")
+    key = req.key.strip() or secret(provider_key_name(provider))
+    if not key:
+        raise HTTPException(400, "Paste the key first")
+    try:
+        return {"models": provider_models(provider, key)}
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, provider_error(e))
+
+@app.post("/api/agents/api")
+def add_api_agent(req: ApiAgentRequest):
+    """No command runs, so this one works from the phone too. Saved only after the model answers a test."""
+    if req.provider not in API_PROVIDERS:
+        raise HTTPException(404, "Unknown company")
+    model = req.model.strip()
+    if not MODEL_RE.fullmatch(model):
+        raise HTTPException(400, "Pick a model")
+    key_name = provider_key_name(req.provider)
+    key = req.key.strip()[:500] or secret(key_name)
+    if not key:
+        raise HTTPException(400, "Paste the key first")
+    label = (req.label.strip() or model.split("/")[-1])[:40]
+    agent = {"id": _new_agent_id(label), "label": label, "role": (req.role.strip() or "General answers")[:120],
+             "kind": "api", "provider": req.provider, "model": model, "timeout": 600, "created": get_timestamp()}
+    try:
+        data = _provider_call(req.provider, key, "/chat/completions",
+                              {"model": model, "messages": [{"role": "user", "content": "Reply with exactly one word: hello"}]}, timeout=120)
+        answer = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Test failed. {provider_error(e)}")
+    if not answer.strip():
+        raise HTTPException(400, "Test failed: the model sent back nothing")
+    if req.key.strip():  # only a key that worked is kept
+        secrets_set(key_name, SecretValue(value=key))
+    _save_agent(agent)
+    append_audit({"action": "agent_added", "agent": agent["id"], "msg_preview": f"api {req.provider} {model}"[:60]})
+    return {**agent, "test_answer": answer.strip()[:200], "logo": find_agent_logo(agent)}
 
 # Logo lookup (Jhon: the OS finds it by itself). LobeHub covers AI tools (Codex, OpenAI, Gemini...), simple-icons
 # general brands. Tried by id, name and program name; no match = letter badge, and an upload still wins.
@@ -3765,7 +4532,9 @@ LOGO_SOURCES = ["https://cdn.jsdelivr.net/npm/@lobehub/icons-static-svg@1.101.0/
                 "https://cdn.jsdelivr.net/npm/simple-icons@16.36.0/icons/{}.svg"]
 
 def find_agent_logo(agent: dict) -> Optional[str]:
-    names = [agent["id"], re.sub(r"[^a-z0-9]", "", agent["label"].lower()), Path(agent["command"][0]).stem.lower()]
+    names = [agent["id"], re.sub(r"[^a-z0-9]", "", agent["label"].lower()),
+             agent["model"].split("/")[0].split("-")[0].lower() if "model" in agent else "",  # the model's family: deepseek/..., qwen-...
+             Path(agent["command"][0]).stem.lower() if "command" in agent else agent.get("provider", "")]
     for name in dict.fromkeys(n for n in names if re.fullmatch(r"[a-z0-9-]{2,40}", n)):
         for url in LOGO_SOURCES:
             try:
@@ -3860,8 +4629,20 @@ def _codex_models(agent: str) -> list:
     _model_lists[agent] = (time.time(), found)
     return found
 
+def _model_line(line: str) -> str:
+    """A model id from one line of `<cli> models`: a list item ("* x", "- x", "• x") or a bare id; prose lines don't count.
+    The default is marked "(default)" by most CLIs and comes back first in their lists."""
+    item = re.sub(r"^[*\-•]\s+", "", line)
+    word = item.split(" ")[0].rstrip(":,")
+    if word == line.strip() or item != line:  # a lone token, or a bulleted one
+        return word if re.search(r"\d", word) and re.search(r"[a-z]", word, re.I) and ("-" in word or "/" in word) else ""
+    return ""
+
+def _cli_name(agent: str) -> str:
+    return Path(((_custom_agent(agent) or {}).get("command") or [""])[0]).stem.lower()
+
 def _is_codex(agent: str) -> bool:
-    return Path(((_custom_agent(agent) or {}).get("command") or [""])[0]).stem.lower() == "codex"
+    return _cli_name(agent) == "codex"
 
 @app.get("/api/models/{agent}")
 def list_models(agent: str):
@@ -3882,6 +4663,33 @@ def list_models(agent: str):
             model, effort = model or str(cfg.get("model", "")), effort or str(cfg.get("model_reasoning_effort", ""))
         except (OSError, ValueError):
             pass
+    elif agent == "hermes":  # no `hermes models`; it runs OpenRouter's free models, whose list is public (no key)
+        hit = _model_lists.get(agent)
+        if hit and time.time() - hit[0] < 600:
+            models = hit[1]
+        else:
+            try:
+                models = [m for m in provider_models("openrouter", secret("OPENROUTER_API_KEY")) if m.endswith(":free")]
+                _model_lists[agent] = (time.time(), models)
+            except Exception:  # noqa: BLE001 - offline: free text
+                models = []
+    elif _custom_agent(agent) and "command" in _custom_agent(agent) and has_model_choice(agent):
+        # Jhon 30 Oct: added agents list their own models, so he never types one. Most CLIs have `<cli> models`
+        # (grok prints "  * grok-4.7 (default)" / "  - grok-4.6"); none = the page offers free text as before
+        exe = shutil.which(_custom_agent(agent)["command"][0]) or _custom_agent(agent)["command"][0]
+        models = _cli_models(agent, [exe, "models"], _model_line)
+        model = model or next(iter(models), "")
+    elif (custom := _custom_agent(agent) or {}).get("kind") == "api":
+        model = model or custom["model"]
+        hit = _model_lists.get(agent)
+        if hit and time.time() - hit[0] < 600:
+            models = hit[1]
+        else:
+            try:
+                models = provider_models(custom["provider"], secret(provider_key_name(custom["provider"])))
+                _model_lists[agent] = (time.time(), models)
+            except Exception:  # noqa: BLE001 - offline / key gone: free text
+                models = []
     else:
         models = [] if has_model_choice(agent) else None  # Hermes (free tier, OpenRouter names) and added agents: free text
     return {"models": models, "efforts": agent_efforts(agent), "current": model, "current_effort": effort,
@@ -4013,8 +4821,9 @@ def get_chat_history(q: str = Query(""), agent: str = Query(""), limit: int = Qu
     if q:
         ql = q.lower()
         messages = [m for m in messages if ql in m.get("content", "").lower()]
-    if agent:
-        messages = [m for m in messages if m.get("agent") == agent]
+    if agent:  # only this agent's open chat; a message with no chat id belongs to it
+        cur = current_chat_id(agent)
+        messages = [m for m in messages if m.get("agent") == agent and (m.get("chat") or cur) == cur]
     if limit:
         messages = messages[-limit:]
     return {"messages": messages, "total": len(messages), "query": q, "agent": agent}
@@ -4756,6 +5565,24 @@ def approval_items() -> list:
                           "expires": datetime.fromtimestamp(a["expires_at"], timezone.utc).isoformat(), "link": "#/home"})
     except (OSError, ValueError, KeyError):  # Jharvis is off: his Slack/voice asks just aren't listed
         pass
+    for c in crews.load():
+        for r in c["runs"]:
+            if r["status"] == "awaiting_approval":
+                items.append({"id": f"crew:{c['id']}:{r['id']}", "kind": "crew", "title": f"{c['name']}: " + ("post this?" if r.get("post") else "use this?"),
+                              "detail": (r["error"] + "\n\n" if r.get("error") else "") + (r["post"]["caption"] if r.get("post") else r.get("output", "")),
+                              "agent": c["name"], "created": r["at"], "link": "#/team",
+                              **({"url": f"/api/crews/{c['id']}/runs/{r['id']}/slide/0"} if r.get("post") else {})})
+    if c := tidy.next_card():  # one at a time: the next shows once this one is answered
+        label = {"drl": "Sort Dr L files", "half": "Half done", "old": "Old", "unused": "Still need it?"}[c["kind"]]
+        items.append({"id": f"tidy:{c['id']}", "kind": "tidy", "title": f"{label}: {c['rel']} ({c['bytes'] / 1e9:.2f} GB)",
+                      "detail": f"{c['why']} {c['files']} files, last changed {c['newest'][:10]}.\n\nJharvis's pick: {c['pick']}.\n"
+                                f"Approve = do that. Deny = keep it where it is (not asked again for 90 days).",
+                      "agent": "Jharvis (D: tidy)", "created": tidy.load().get("last_scan") or "", "link": "#/approvals"})
+    for sess in _meeting_sessions():
+        v = sess["messages"][-1]
+        if v.get("role") == "verdict" and not v.get("decision") and NOTHING not in v["content"][:300] and "verdict unavailable" not in v["content"]:
+            items.append({"id": f"meeting:{sess['id']}", "kind": "meeting", "title": f"{sess['title']}: build this?", "detail": v["content"],
+                          "agent": "Agents' meeting", "created": v["timestamp"], "link": "#/sessions"})
     for r in _lab_runs():
         if _lab_overridable(r):
             items.append({"id": f"skill:{r['id']}", "kind": "skill", "title": f"Install {r['name'] or 'the skill'} anyway?",
@@ -4789,6 +5616,31 @@ def approval_decide(aid: str, d: ApprovalDecision, request: Request):
             raise HTTPException(409, f"Jharvis no longer waits on this one ({e.code})")
         except OSError:
             raise HTTPException(503, "Jharvis isn't running")
+    if kind == "meeting":
+        if yes:
+            return session_decision(ref, SessionDecision(approve=True))
+        sess = get_session(ref)  # Deny drops the idea; no more rounds (a debate he started would go back for another try)
+        sess["messages"][-1]["decision"] = {"approved": False, "at": get_timestamp(), **({"note": d.note[:2000]} if d.note else {})}
+        save_session(sess)
+        return sess
+    if kind == "crew":
+        cid, _, rid = ref.partition(":")
+        try:
+            return crew_decide(cid, rid, yes)
+        except KeyError:
+            raise HTTPException(404, "No such agent")
+    if kind == "tidy":
+        start = lambda text: create_session(SessionRequest(message=text, agents=["claude", "codex"], rounds=2))["id"]  # noqa: E731
+        try:
+            c = tidy.decide(ref, yes, start)
+        except KeyError:
+            raise HTTPException(409, "Already answered")
+        except FileNotFoundError:
+            raise HTTPException(409, "It's gone since the scan")
+        except PermissionError:
+            raise HTTPException(409, "A scheduled task uses it now, so it stays")
+        append_audit({"action": f"tidy_{c['status']}", "agent": "jharvis", "msg_preview": f"{c['rel']}: {len(c.get('moves', []))} moved"})
+        return c
     if kind == "skill":
         if yes:
             return skill_lab_install_anyway(ref, request)

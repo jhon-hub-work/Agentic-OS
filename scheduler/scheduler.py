@@ -210,7 +210,8 @@ class CronScheduler:
             if not data.get("enabled", True):
                 continue
             try:
-                ready.append((data, CT.from_crontab(data["cron"]), data.get("id", data["name"])))
+                # "timezone" (e.g. Asia/Manila) keeps a post at the same Manila hour when US daylight saving shifts the PC
+                ready.append((data, CT.from_crontab(data["cron"], timezone=data.get("timezone")), data.get("id", data["name"])))
             except Exception as e:
                 print(f"  Failed to schedule {data.get('name')}: {e}")
         for job in self._scheduler.get_jobs():

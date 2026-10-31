@@ -194,8 +194,8 @@ function linksOf(c: Cloud): { ab: Uint32Array; rest: Float32Array } {
  *  Follows the pointer; `pulse` changing sends a ring out (e.g. when the urgent task changes).
  *  While he speaks, dots rise out of the wave into a 3D orb (sometimes a human head whose jaw moves with his voice);
  *  `shape` makes them form what he wants to show. Drag a shape to turn it. When he's done the dots pour back in. */
-function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }: {
-  pulse?: number; energy?: { current: number }; mood?: { current: string }
+function WaveField({ pulse = 0, energy, mood, speaking, shape, wave = true, className = '' }: {
+  pulse?: number; energy?: { current: number }; mood?: { current: string }; wave?: boolean  // false = the shape alone (phone)
   speaking?: { current: boolean }; shape?: { current: DotShape | null }; className?: string
 }) {
   const ref = useRef<HTMLCanvasElement>(null)
@@ -245,12 +245,14 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
     const tex = new THREE.CanvasTexture(sprite)
     const mat = new THREE.PointsMaterial({ size: 0.15, map: tex, vertexColors: true, transparent: true, depthWrite: false })
     const points = new THREE.Points(geo, mat)
+    points.visible = wave
     scene.add(points)
     const gx = new Float32Array(n), gz = new Float32Array(n)
     for (let i = 0; i < n; i++) { gx[i] = pos[i * 3]; gz[i] = pos[i * 3 + 2] }
 
     // ─── shapes: their own dots, each with a home dot in the middle of the wave it rises from and pours back into ───
     const STEP = W / (COLS - 1), CX = 0, CY = 1.9, CZ = 1.2, S = 1.4  // where shapes stand: clear above the wave crest
+    if (!wave) { camera.position.set(CX, CY + 0.9, CZ + 4.6); camera.lookAt(CX, CY, CZ) }  // no wave: frame the shape alone
     const RING_N = 7, RING_DOTS = 26, SN = MAX + RING_N * RING_DOTS  // + the rings that rise from the wave into the shape
     const sPos = new Float32Array(SN * 3), sCol = new Float32Array(SN * 4), home = new Uint32Array(MAX), rate = new Float32Array(MAX)
     const middle: number[] = []
@@ -466,7 +468,7 @@ function WaveField({ pulse = 0, energy, mood, speaking, shape, className = '' }:
         const base = waveY(bottom[0], bottom[2]), gap = bottom[1] - base
         for (let r = 0; r < RING_N; r++) {
           const ph = (t * 0.3 + r / RING_N) % 1, y = base + gap * ph, rad = (0.55 - 0.3 * ph) * (S / 1.4)
-          const a = gap > 0.2 ? formMix * Math.sin(Math.PI * ph) * 0.7 : 0
+          const a = wave && gap > 0.2 ? formMix * Math.sin(Math.PI * ph) * 0.7 : 0  // no wave (phone): no rings (Jhon 31 Oct)
           for (let j = 0; j < RING_DOTS; j++) {
             const k = MAX + r * RING_DOTS + j, an = (j / RING_DOTS) * Math.PI * 2 + r * 0.4
             sPos.set([bottom[0] + Math.cos(an) * rad, y, bottom[2] + Math.sin(an) * rad], k * 3)

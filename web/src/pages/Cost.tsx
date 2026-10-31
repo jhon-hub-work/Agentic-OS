@@ -5,7 +5,7 @@ import { AgentLogo, Empty, ErrorLine, PageHead, Panel, Skeleton, usePoll } from 
 
 const JOB_NAMES: Record<string, string> = {
   verdict: 'Debate verdict', self_review: 'Daily self-review', ticket_plan: 'Ticket planning',
-  jobs: 'Job search drafting', fallback: "Backup when OpenCode's free tier runs out",
+  jobs: 'Job search drafting', fallback: 'Backup when the free agents run out', check: 'Checking replies and fixes',
 }
 const WINDOWS: { key: keyof GuardUsage; label: string; short: string }[] = [
   { key: 'five_hour', label: '5-hour window', short: '5h' }, { key: 'seven_day', label: 'This week', short: 'wk' },
@@ -79,7 +79,8 @@ function GuardPanel({ g, reload }: { g: ClaudeGuard; reload: () => void }) {
           {Object.entries(g.jobs).map(([job, v]) => (
             <li key={job} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2.5">
               <div className="flex flex-col">
-                <span className="text-sm text-ink">{JOB_NAMES[job] ?? job}</span>
+                <span className="text-sm text-ink">{JOB_NAMES[job] ?? job}
+                  <span className="ml-2 text-xs text-ink-3">{v.tier === 'heavy' ? 'Heavy' : 'Light'}{v.model && ` · ${v.model}`}</span></span>
                 {job === 'jobs' ? <span className="text-xs text-ink-3">Stays on Claude: it reads your CV, and free models may log prompts.</span>
                   : v.now !== v.picked && <span className="text-xs text-warn">Paused by the guard: runs on {AGENT_META[v.now]?.label ?? v.now} for now</span>}
               </div>

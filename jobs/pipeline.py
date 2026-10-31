@@ -199,6 +199,16 @@ def needs_owner(job: dict) -> str:
     return ""
 
 
+def upwork_offers(log=print) -> list:
+    """Invites and offers Upwork mailed him; they skip the lane and pay gates and are drafted first."""
+    from . import upwork_invites
+    try:
+        return upwork_invites.offers(log)
+    except Exception as e:  # noqa: BLE001 - the other boards still run
+        log(f"source Upwork invites failed: {e!r}")
+        return []
+
+
 def hoot_offers(log=print) -> list:
     """OnlineJobs.ph + company boards via Hoot's scanner (system Python). These can be applied to."""
     import os
@@ -215,7 +225,7 @@ def hoot_offers(log=print) -> list:
         return []
 
 
-def run(run_agent, log=print, after=None) -> dict:
+def run(run_agent, log=print, after=None, invites_only=False) -> dict:
     """One full pass. run_agent(agent, prompt) -> text is the OS's execute_agent. after() runs once the drafts are on
     the board (auto-apply) and returns how many went out; "finished" is stamped after it, so reports include the sends."""
     board = load(BOARD, {"jobs": [], "runs": []})
@@ -223,7 +233,7 @@ def run(run_agent, log=print, after=None) -> dict:
     stats = {"started": now(), "fetched": 0, "new": 0, "kept": 0, "scored": 0, "drafted": 0, "needs_you": 0, "errors": []}
 
     note = lambda m: log(m) or (stats["errors"].append(m) if "failed" in m else None)
-    offers = hoot_offers(log=note) + sources.fetch_all(log=note) + indeed_alert_offers(seen, log=note)  # applyable ones first
+    offers = upwork_offers(log=note) if invites_only else upwork_offers(log=note) + hoot_offers(log=note) + sources.fetch_all(log=note) + indeed_alert_offers(seen, log=note)  # applyable ones first
     stats["fetched"] = len(offers)
     known = {same_job(j) for j in board["jobs"]}
     fresh = []
@@ -238,7 +248,7 @@ def run(run_agent, log=print, after=None) -> dict:
     # (past MAX_SCORE, or in a batch whose reply didn't parse) come back next run.
     kept, done = [], []
     for o in fresh:
-        why = lanes.gate(o, o.get("jd") or "") or ("" if pay_ok(o) else "pays under the pay floor")
+        why = "" if o.get("invite") else lanes.gate(o, o.get("jd") or "") or ("" if pay_ok(o) else "pays under the pay floor")  # a client asked him: always answer
         (done if why else kept).append(o)
     stats["kept"] = len(kept)
 
@@ -257,8 +267,8 @@ def run(run_agent, log=print, after=None) -> dict:
     cv = CV.read_text(encoding="utf-8") if CV.exists() else ""
     answers = ANSWERS.read_text(encoding="utf-8") if ANSWERS.exists() else ""
     drafted_queue, new_items = {}, []
-    for j in sorted((j for j in scored if j["score"] >= lanes.bar(j)), key=lambda j: j["score"]):
-        item = {k: j.get(k) for k in ("source", "url", "company", "location", "pay", "score", "reason", "needs_you", "needs_why")}
+    for j in sorted((j for j in scored if j["score"] >= lanes.bar(j) or j.get("invite")), key=lambda j: j["score"]):
+        item = {k: j.get(k) for k in ("source", "url", "company", "location", "pay", "score", "reason", "needs_you", "needs_why", "invite")}
         item.update(id=job_id(j["url"]), title=re.sub(r"\s*<.*$", "", j.get("title") or "").strip(),  # scraped titles can carry HTML
                     lane=lanes.kind_of(j["title"]), found=now(), draft="", jd=(j.get("jd") or "")[:3000],
                     status="needs_you" if j.get("needs_you") else "queued")
@@ -267,7 +277,7 @@ def run(run_agent, log=print, after=None) -> dict:
     # Draft the best MAX_DRAFT of this run's and earlier queued matches, ones the OS can apply to first.
     applyable = lambda j: "onlinejobs.ph" in j["url"] or any(h in j["url"] for h in ("greenhouse.io", "lever.co", "ashbyhq.com"))
     queue = [j for j in board["jobs"] if j["status"] == "queued"] + [j for j in new_items if j["status"] == "queued"]
-    for item in sorted(queue, key=lambda j: (applyable(j), j.get("score") or 0), reverse=True)[:MAX_DRAFT]:
+    for item in sorted(queue, key=lambda j: (bool(j.get("invite")), applyable(j), j.get("score") or 0), reverse=True)[:MAX_DRAFT]:
         try:
             text = draft(item, run_agent, cv, answers)
         except RuntimeError as e:  # the OS's Claude guard: the rest stay queued for the next run
@@ -375,7 +385,7 @@ def draft_followup(job: dict, run_agent) -> str:
 
 
 def platform(url: str) -> str:
-    for name, host in (("OnlineJobs", "onlinejobs.ph"), ("Reddit", "reddit.com"), ("Indeed", "indeed.com"), ("X", "x.com"),
+    for name, host in (("Upwork", "upwork.com"), ("OnlineJobs", "onlinejobs.ph"), ("Reddit", "reddit.com"), ("Indeed", "indeed.com"), ("X", "x.com"),
                        ("Instagram", "instagram.com"), ("Facebook", "facebook.com"), ("LinkedIn", "linkedin.com")):
         if host in (url or ""):
             return name

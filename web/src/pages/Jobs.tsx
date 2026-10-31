@@ -98,8 +98,10 @@ function Board({ who, person }: { who: string; person?: { name: string; summary?
       </div>
       {!who && <form onSubmit={addLink} className="mb-5 flex flex-wrap items-center gap-2">
         <input value={link} onChange={e => setLink(e.target.value)} placeholder="Paste an Indeed job link"
-          aria-label="Indeed job link" className="min-w-0 flex-1 rounded-full border border-white bg-white/55 px-4 py-2 text-sm text-ink" />
-        <ChromeButton type="submit" disabled={adding || !link.trim()}>{adding ? 'Adding' : 'Add'}</ChromeButton>
+          aria-label="Indeed job link" className="min-h-11 min-w-0 flex-1 truncate rounded-full border border-white bg-white/70 px-4 text-sm text-ink" />
+        <button type="submit" disabled={adding || !link.trim()}
+          className="min-h-11 cursor-pointer rounded-full border border-white bg-white/70 px-5 text-sm text-ink hover:bg-white disabled:cursor-default disabled:opacity-50">
+          {adding ? 'Adding' : 'Add'}</button>
         {addMsg && <p className="w-full text-xs text-ink-3">{addMsg}</p>}
       </form>}
       <div className="mb-3 flex flex-wrap gap-2" role="tablist" aria-label="Platform">

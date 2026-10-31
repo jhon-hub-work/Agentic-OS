@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useState } from 'react'
 import { AGENT_META, api, timeAgo, type AgentName, type Thread } from '../api'
 import { AgentLogo, ChromeButton, Empty, ErrorLine, PageHead, Panel, Prose, Skeleton, spring, usePoll } from '../ui'
+import Crews from './Crews'
 
 const AGENTS = Object.keys(AGENT_META) as AgentName[]
 
@@ -31,6 +32,8 @@ export default function Team() {
   return (
     <>
       <PageHead eyebrow="Team" title="Agents working together" sub="Give one agent a task. When another is better placed, it hands over, up to 5 hops. Nothing leaves the OS without you." />
+
+      <Crews />
 
       <Panel className="mb-5">
         <form onSubmit={submit} className="flex flex-col gap-4">

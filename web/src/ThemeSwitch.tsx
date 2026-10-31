@@ -1,4 +1,6 @@
 import { useRef } from 'react'
+import whooshIn from './sfx/whoosh-in.mp3'
+import whooshOut from './sfx/whoosh-out.mp3'
 
 /** Light/dark switch: a black hole. To dark, the light page is vacuumed into it (bends, gathers into cloth
  *  folds, slips in), then the dark interface opens out of it. To light, it blows the page back out.
@@ -57,6 +59,14 @@ function swallowFx(hole: HTMLElement) {
     { duration: 650, easing: 'ease-out' })
 }
 
+// a small whoosh on tap (Jhon 30 Oct): swells into the swallow going dark, blows outward going light (earshot
+// whoosh_fast/sleeve, checked clean). Quiet; a blocked play (no sound allowed) is ignored.
+function whoosh(dark: boolean) {
+  const a = new Audio(dark ? whooshIn : whooshOut)
+  a.volume = 0.35
+  a.play().catch(() => {})
+}
+
 export default function ThemeSwitch({ className = '' }: { className?: string }) {
   const btn = useRef<HTMLButtonElement>(null)
   const svg = useRef<SVGSVGElement>(null)
@@ -66,6 +76,7 @@ export default function ThemeSwitch({ className = '' }: { className?: string }) 
     const hole = btn.current!, root = document.documentElement, body = document.body
     if (busy.current) return
     const dark = !root.classList.contains('dark')
+    whoosh(dark)
     if (!document.startViewTransition || reduce()) { setTheme(dark); return }
     busy.current = true
     hole.classList.add('bh-busy')
@@ -137,7 +148,7 @@ export default function ThemeSwitch({ className = '' }: { className?: string }) 
       <svg ref={svg} width="0" height="0" style={{ position: 'absolute' }} aria-hidden="true" />
       <button ref={btn} onClick={toggle} className={`black-hole ${className}`}
         aria-label="Switch between light and dark mode" title="Light / dark">
-        <span className="bh-disk" /><span className="bh-core" />
+        <span className="bh-back" /><span className="bh-arc" /><span className="bh-core" /><span className="bh-front" />
       </button>
     </>
   )

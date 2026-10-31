@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -67,6 +68,11 @@ class Harness:
         server.load_custom_agents()
 
         pipeline.BOARD = self.tmp / "data" / "jobs" / "board.json"
+        import tidy  # its weekly loop starts with the server: scan an empty temp "drive", never the real D:
+        tidy.ROOT, tidy.STATE = self.tmp / "drive", self.tmp / "data" / "tidy.json"
+        (self.tmp / "drive").mkdir(exist_ok=True)
+        import crews
+        crews.STATE, crews.RUNS_DIR = self.tmp / "data" / "crews.json", self.tmp / "data" / "crews"
 
         sched.BASE_DIR = self.tmp / "scheduler"
         sched.JOBS_DIR = self.tmp / "scheduler" / "jobs"
@@ -99,6 +105,10 @@ class Harness:
             "agents/agy",
         ]:
             (self.tmp / d).mkdir(parents=True, exist_ok=True)
+        # the worker loop must not start a real self-review or agents' meeting on Jhon's paid agents
+        now = json.dumps({"last": datetime.now(timezone.utc).isoformat()})
+        (self.tmp / "data" / "self-review.json").write_text(now)
+        (self.tmp / "data" / "meeting.json").write_text(now)
         # Copy real read-only content (skills, brain notes) so endpoints
         # behave realistically, without ever writing back to the repo.
         for src, dst in [

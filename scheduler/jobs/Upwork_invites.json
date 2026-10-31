@@ -1,0 +1,13 @@
+{
+  "id": "7d0e5a11",
+  "name": "Upwork invites",
+  "kind": "upwork",
+  "agent": "claude",
+  "prompt": "Draft replies to new Upwork invites from Gmail.",
+  "skill": null,
+  "cron": "*/30 * * * *",
+  "enabled": true,
+  "created": "2026-10-31T00:00:00+00:00",
+  "last_run": "2026-10-31T12:30:03.129025+00:00",
+  "next_run": null
+}

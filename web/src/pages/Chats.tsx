@@ -100,6 +100,7 @@ export default function Chats() {
           if (e.type === 'context') setMeta(x => ({ ...x, context: e.used ? { used: e.used, window: e.window ?? x.context?.window ?? null } : null }))
           else if (e.type === 'text') setLive(l => l && { ...l, text: l.text + e.text })
           else if (e.type === 'tool') setLive(l => l && { ...l, steps: [...l.steps.filter(s => s.toolCallId !== e.toolCallId), { ...l.steps.find(s => s.toolCallId === e.toolCallId), ...e }] })
+          else if (e.type === 'error') setError(e.error)
           else if (e.type === 'done') setMsgs(prev => [...(prev ?? []), e.message])
         }, pick)
         if (agent === 'claude') api.chatMeta(agent).then(r => setMeta(x => ({ ...x, commands: r.commands }))).catch(() => {})

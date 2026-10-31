@@ -48,3 +48,4 @@ data/scheduler-history.torn-*.json
 data/skill-lab/
 data/chat-index.json
 desktop/installer/
+config/secrets.json

@@ -191,7 +191,7 @@ class ClaudeGuardTests(unittest.TestCase):
             self.assertAlmostEqual(s._resting["opencode"], time.time() + 7200, delta=60)
             self.assertEqual(s.execute_agent("opencode", "y"), "hermes says hi")   # resting: not even tried
             self.assertEqual(calls, ["opencode", "hermes", "hermes"])
-        with mock.patch.object(s, "_execute_agent", return_value="hermes failed: HTTP 429 quota"):
+        with mock.patch.object(s, "_execute_agent", return_value="hermes failed: HTTP 429 quota"),              mock.patch.dict(s.BACKGROUND_PICKS, {"fallback": "hermes"}):  # only free agents in this test
             self.assertTrue(s.execute_agent("hermes", "z").startswith(s.ALL_LIMITED))  # all out: the caller waits
         s._resting.clear()
 

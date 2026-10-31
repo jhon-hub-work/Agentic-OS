@@ -6,10 +6,15 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -22,8 +27,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.window.OnBackInvokedDispatcher
@@ -149,27 +154,49 @@ class MainActivity : Activity() {
     }
 
     private fun offlineScreen(): View {
-        val pad = (24 * resources.displayMetrics.density).toInt()
+        val dp = resources.displayMetrics.density
+        fun px(v: Int) = (v * dp).toInt()
+        fun wrap(top: Int) = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = px(top) }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(pad, pad, pad, pad)
+            setPadding(px(32), px(32), px(32), px(32))
             setBackgroundColor(Color.parseColor("#E6EEF4"))
             visibility = View.GONE
             isClickable = true
+            // the app logo (ic_fg has adaptive-icon padding, so the mark shows at about half this size)
+            addView(ImageView(context).apply { setImageResource(R.drawable.ic_fg) }, LinearLayout.LayoutParams(px(112), px(112)))
             addView(TextView(context).apply {
-                text = "Can't reach your PC — is it awake and Tailscale on?"
-                textSize = 18f
+                text = "PC offline"
+                textSize = 22f
+                letterSpacing = -0.01f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 setTextColor(Color.parseColor("#0E1726"))
                 gravity = Gravity.CENTER
-            })
-            addView(Button(context).apply {
-                text = "Retry"
+            }, wrap(4))
+            addView(TextView(context).apply {
+                text = "Reconnect"
+                textSize = 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setPadding(px(28), px(12), px(28), px(12))
+                background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#33FFFFFF")),
+                    GradientDrawable().apply { cornerRadius = px(999).toFloat(); setColor(Color.parseColor("#0E1726")) }, null)
+                isClickable = true
+                // press feedback on touch-down, not on release
+                setOnTouchListener { v, e ->
+                    when (e.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> v.animate().scaleX(0.96f).scaleY(0.96f).setDuration(90).start()
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.animate().scaleX(1f).scaleY(1f).setDuration(160).start()
+                    }
+                    false
+                }
                 setOnClickListener {
                     offline.visibility = View.GONE
                     web.loadUrl(failedUrl ?: "$ORIGIN/")
                 }
-            }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = pad })
+            }, wrap(28))
         }
     }
 }

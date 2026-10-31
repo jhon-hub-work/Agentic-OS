@@ -5,6 +5,9 @@ import JharvisTalk, { type Mood } from './JharvisTalk'
 import { Item } from './pages/Approvals'
 import { GuardMini } from './pages/Cost'
 import { ChromeButton, Empty, ErrorLine, Panel, inputCls, usePoll } from './ui'
+import WaveField, { type DotShape } from './WaveField'
+
+const BUST: DotShape = { id: 'phone-bust', name: 'bust' }  // Jhon 31 Oct: see him while talking, not just a mic
 
 /** Phone opened from the PC's QR (/#pair=<token>): trade the token once for the aos_token cookie.
  *  The fragment never reaches the server; it leaves the address bar before anything else runs. */
@@ -138,9 +141,10 @@ const More = ({ href, children }: { href: string; children: string }) => (
   <a href={href} className="inline-flex min-h-11 items-center gap-1 text-sm font-medium text-navy">{children}<ArrowRight size={14} aria-hidden="true" /></a>
 )
 
-/** Jharvis's page on a phone: talk to him, answer approvals, see usage. No waves (too heavy for a phone). */
+/** Jharvis's page on a phone: his dotted head and shoulders (the jaw moves with his voice), talk to him, answer
+ *  approvals, see usage. */
 export function PhoneHome() {
-  const energy = useRef(0), mood = useRef<Mood>('normal')
+  const energy = useRef(0), mood = useRef<Mood>('normal'), speaking = useRef(false), shape = useRef<DotShape | null>(BUST)
   const ap = usePoll(api.approvals, 5000)
   const limits = usePoll(api.agentLimits, 60000)
   const list = ap.data?.approvals ?? []
@@ -151,7 +155,10 @@ export function PhoneHome() {
         <p className="text-[15px] font-medium text-ink">Agentic OS</p>
       </header>
 
-      <Panel inner="py-6"><JharvisTalk energy={energy} mood={mood} onReply={() => {}} big /></Panel>
+      <Panel inner="pb-6">
+        <WaveField energy={energy} mood={mood} speaking={speaking} shape={shape} wave={false} className="-mx-2 block h-[26rem] w-[calc(100%+1rem)]" />
+        <JharvisTalk energy={energy} mood={mood} speaking={speaking} onReply={() => {}} big />
+      </Panel>
 
       <section aria-labelledby="ph-approvals" className="flex flex-col gap-3">
         <div className="flex items-center justify-between px-1">

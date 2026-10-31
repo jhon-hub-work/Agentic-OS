@@ -2,18 +2,21 @@ export type AgentName = string  // the 4 built in + any added on Agents & tools 
 export type Agent = { name: AgentName; status: 'online' | 'offline' }
 export type CostEntry = { timestamp: string; agent: string; tokens: number; cost: number; model: string }
 export type AuditEntry = { id?: string; action: string; timestamp: string; agent?: string; skill?: string; msg_preview?: string; output_preview?: string; thread?: string; hops?: number }
+export type CrewRole = { agent: string; model?: string; effort?: string }
+export type CrewRun = { id: string; at: string; status: 'running' | 'awaiting_approval' | 'approved' | 'posting' | 'posted' | 'denied' | 'failed'; step?: string; advice?: string; help?: string; output?: string; error?: string; slides?: number; post?: { caption: string }; auto?: boolean }
+export type Crew = { id: string; name: string; task: string; skills: string[]; agent: CrewRole; advisor: CrewRole | null; helper: CrewRole | null; action: string; schedule: string; approve_first: number; approved: number; runs: CrewRun[]; ig_handle?: string }
 export type Skill = { name: string; description: string; has_learnings: boolean; scores: unknown[] }
 export type TeamStep = { agent: AgentName; task: string; output: string; handoff_to: AgentName | null; timestamp: string }
 export type Thread = { id: string; message: string; start_agent: AgentName; status: 'running' | 'done'; active: AgentName | null; steps: TeamStep[]; created: string }
 
-export type ChatMsg = { id: string; role: 'user' | 'assistant'; agent: AgentName; content: string; timestamp: string }
+export type ChatMsg = { id: string; role: 'user' | 'assistant'; agent: AgentName; content: string; timestamp: string; by?: string; why?: string }
 /** One chat in an agent's chat list; current = the open one. */
 export type ChatItem = { id: string; title: string; updated: string; count: number; current: boolean; snippet?: string }
 export type ToolStep ={ tool: string; toolCallId: string; label?: string; emoji?: string; status: 'running' | 'completed' | string }
 export type ChatContext = { used: number; window: number | null }
 export type StreamEvent = ({ type: 'context' } & ChatContext) | { type: 'text'; text: string } | ({ type: 'tool' } & ToolStep) | { type: 'error'; error: string } | { type: 'cleared' } | { type: 'done'; message: ChatMsg }
-export type SessionMsg = { role: 'user' | 'agent' | 'verdict'; agent: AgentName | null; round: number; content: string; timestamp: string; prompt_tokens?: number }
-export type Session = { id: string; title: string; agents: AgentName[]; rounds: number; round: number; status: 'running' | 'idle'; working: AgentName[]; judging?: boolean; messages: SessionMsg[]; created: string; pinned?: boolean; read?: boolean; section?: string; archived?: boolean; overrides?: Record<AgentName, ModelChoice> }
+export type SessionMsg = { role: 'user' | 'agent' | 'verdict'; agent: AgentName | null; round: number; content: string; timestamp: string; prompt_tokens?: number; decision?: { approved: boolean; ticket?: string; at: string } }
+export type Session = { id: string; title: string; agents: AgentName[]; rounds: number; round: number; status: 'running' | 'idle' | 'awaiting_user'; questions?: string[]; working: AgentName[]; judging?: boolean; messages: SessionMsg[]; created: string; pinned?: boolean; read?: boolean; section?: string; archived?: boolean; overrides?: Record<AgentName, ModelChoice> }
 /** One agent's model + effort; "" or missing = its default. */
 export type ModelChoice = { model?: string; effort?: string }
 /** models: its list ([] = type a name, null = no model choice); default: what "Default" runs when nothing is set. */
@@ -32,12 +35,12 @@ export type TicketStatus = 'new' | 'planning' | 'awaiting_approval' | 'approved'
 export type Ticket = { id: string; title: string; description: string; category: TicketCategory; severity: TicketSeverity; status: TicketStatus; project: string; reporter: string; assignee: string; created: string; updated: string; pickup_by: string; due: string; plan: string; result: string; files?: string[]; log: { at: string; who: string; text: string }[] }
 export type GuardUsage = { five_hour: number; seven_day: number }
 /** picked = the setting; now = what runs right now (Claude falls back to the free default while the guard blocks). */
-export type ClaudeGuard = { usage: GuardUsage | null; blocked: string | null; default: AgentName; limits: GuardUsage; jobs: Record<string, { picked: AgentName; now: AgentName }> }
+export type ClaudeGuard = { usage: GuardUsage | null; blocked: string | null; default: AgentName; limits: GuardUsage; jobs: Record<string, { picked: AgentName; now: AgentName; tier: 'heavy' | 'light'; model: string }> }
 /** One limit window: used_pct (Claude, Codex) or used of limit requests (Hermes). Times are epoch seconds. */
 export type LimitWindow = { name: string; used_pct?: number; used?: number; limit?: number; resets_at?: number }
 export type AgentLimit = { label: string; plan: string; windows: LimitWindow[]; source: 'api' | 'estimate' | 'not reported'; read_at: number | null; calls_today: number; resting_until: number | null; limit_hit_at?: number }
 /** One thing an agent wants Jhon's yes on (GET /api/approvals); id = kind:ref, decided through the source's own path. */
-export type Approval = { id: string; kind: 'ticket' | 'job' | 'jharvis' | 'skill'; title: string; detail: string; agent: string; created: string; link: string; url?: string; expires?: string }
+export type Approval = { id: string; kind: 'ticket' | 'job' | 'jharvis' | 'skill' | 'tidy' | 'crew' | 'meeting'; title: string; detail: string; agent: string; created: string; link: string; url?: string; expires?: string }
 export type JobRun = { started: string; finished?: string; fetched: number; new: number; kept: number; scored: number; drafted: number; needs_you: number; errors: string[] }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -54,6 +57,12 @@ export const api = {
   cost: () => req<{ entries: CostEntry[] }>('/api/cost'),
   audit: (limit = 60) => req<{ entries: AuditEntry[] }>(`/api/audit?limit=${limit}`),
   skills: () => req<Skill[]>('/api/skills'),
+  crews: () => req<{ crews: Crew[]; actions: Record<string, string> }>('/api/crews'),
+  createCrew: (c: Omit<Crew, 'id' | 'approved' | 'runs'>) => req<Crew>('/api/crews', { method: 'POST', body: JSON.stringify(c) }),
+  deleteCrew: (id: string) => req<{ deleted: string }>(`/api/crews/${id}`, { method: 'DELETE' }),
+  runCrew: (id: string) => req<{ run: string }>(`/api/crews/${id}/run`, { method: 'POST' }),
+  secrets: () => req<{ keys: Record<string, string>; set: string[] }>('/api/secrets'),
+  setSecret: (name: string, value: string) => req<{ set: boolean }>(`/api/secrets/${name}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   runSkill: (name: string, input: string, agent = 'auto') =>
     req<{ output: string; agent: string }>(`/api/skills/${encodeURIComponent(name)}/run`, { method: 'POST', body: JSON.stringify({ input, agent }) }),
   chatHistory: (agent: AgentName) => req<{ messages: ChatMsg[] }>(`/api/chat/history?agent=${agent}&limit=100`),
@@ -89,6 +98,7 @@ export const api = {
   forkSession: (id: string) => req<Session>(`/api/sessions/${id}/fork`, { method: 'POST' }),
   deleteSession: (id: string) => req<{ deleted: string }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   sessionMessage: (id: string, message: string) => req<Session>(`/api/sessions/${id}/message`, { method: 'POST', body: JSON.stringify({ message }) }),
+  sessionDecision: (id: string, approve: boolean, note = '') => req<Session>(`/api/sessions/${id}/decision`, { method: 'POST', body: JSON.stringify({ approve, note }) }),
   jobs: () => req<Job[]>('/api/scheduler/jobs'),
   createJob: (job: Partial<Job>) => req<Job>('/api/scheduler/jobs', { method: 'POST', body: JSON.stringify(job) }),
   toggleJob: (id: string, enabled: boolean) => req<Job>(`/api/scheduler/jobs/${id}`, { method: 'PATCH', body: JSON.stringify({ enabled }) }),
@@ -123,6 +133,14 @@ export const api = {
   installAnyway: (id: string) => req<{ started: boolean }>(`/api/skill-lab/${id}/install-anyway`, { method: 'POST' }),
   addAgent: (a: { id: string; label: string; role: string; command: string; timeout: number; relogin: string; model_args: string; effort_args: string }) =>
     req<CustomAgent & { test_answer: string }>('/api/agents', { method: 'POST', body: JSON.stringify(a) }),
+  agentCatalog: () => req<{ catalog: CatalogAgent[] }>('/api/agent-catalog'),
+  addCatalogAgent: (id: string) =>
+    req<{ status: 'added'; test_answer: string } | { status: 'opened'; text: string }>(`/api/agent-catalog/${id}`, { method: 'POST' }),
+  agentProviders: () => req<{ providers: AgentProvider[] }>('/api/agent-providers'),
+  providerModels: (provider: string, key: string) =>
+    req<{ models: string[] }>(`/api/agent-providers/${provider}/models`, { method: 'POST', body: JSON.stringify({ key }) }),
+  addApiAgent: (a: { provider: string; model: string; key: string; label: string; role: string }) =>
+    req<CustomAgent & { test_answer: string }>('/api/agents/api', { method: 'POST', body: JSON.stringify(a) }),
   findAgentLogo: (id: string) => req<{ logo: string }>(`/api/agents/${id}/logo/find`, { method: 'POST' }),
   removeAgent: (id: string) => req<unknown>(`/api/agents/${id}`, { method: 'DELETE' }),
   uploadAgentLogo: async (id: string, file: File) => {
@@ -165,6 +183,8 @@ export const AGENT_META: Record<AgentName, { label: string; role: string; custom
   agy: { label: 'agy', role: 'Web research' },
 }
 
+export type CatalogAgent = { id: string; label: string; installed: boolean; added: boolean; note: string }
+export type AgentProvider ={ id: string; label: string; keys_url: string; has_key: boolean }
 export type CustomAgent = { id: string; label: string; role: string; builtin: boolean; command?: string; logo?: string | null; timeout?: number }
 
 /** Adds Jhon's own agents to AGENT_META. Called once before the app renders, and again after an add or remove. */

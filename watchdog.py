@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watchdog: brings the Agentic OS server, Hermes's gateway and VoiceStudio back when they die.
+"""Watchdog: brings the Agentic OS server, Hermes's gateway, VoiceStudio and the Tailscale tray app back when they die.
 
 Runs hidden at login (Startup\\Agentic OS watchdog.vbs, pythonw). Checks every minute, restarts a service only
 after it failed several checks in a row, and waits longer after each restart that didn't take. Does nothing at
@@ -31,6 +31,7 @@ LOCK_FILE = BASE_DIR / "data" / "watchdog.lock"
 FOCUS_FLAG = Path(r"D:\Work\focus.json")  # the Prompter's live/recording flag: hands off the PC while it exists
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or owner.OWNER.get("hermes_home") or str(Path.home() / ".hermes"))
 VOICESTUDIO = Path.home() / "AppData" / "Local" / "Programs" / "VoiceStudio" / "VoiceStudio.exe"
+TAILSCALE = Path(r"C:\Program Files\Tailscale\tailscale-ipn.exe")  # the tray app; the phone reaches the OS through it
 NO_WINDOW = subprocess.CREATE_NO_WINDOW  # pythonw has no console, so every child would otherwise open a terminal window
 
 EVERY = 60          # seconds between checks
@@ -41,6 +42,7 @@ RULES = {
     "os": (3, 300),       # start.ps1 can take 1-2 min (web rebuild); 5 min before judging it
     "hermes": (3, 180),   # the gateway answers within a minute (server.py waits 60 s for it)
     "voice": (10, 900),   # 503 while loading models on start; only a long outage is the dead-engine fault
+    "tailscale": (3, 300),
 }
 
 log = logging.getLogger("watchdog")
@@ -72,6 +74,16 @@ def voice_up() -> bool:
     try:
         return code == 200 and json.loads(body).get("status") == "ok"
     except ValueError:
+        return False
+
+
+def tailscale_up() -> bool:
+    """31 Oct: the tray app had closed, Tailscale sat in NoState, and the phone couldn't reach the OS."""
+    try:
+        out = subprocess.run([str(TAILSCALE.with_name("tailscale.exe")), "status", "--json"], capture_output=True,
+                             text=True, timeout=30, creationflags=NO_WINDOW).stdout
+        return json.loads(out).get("BackendState") != "NoState"  # Stopped = he switched it off himself: leave it
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
 
 
@@ -139,6 +151,7 @@ SERVICES = {
     "os": (os_up, start_os),
     "hermes": (hermes_up, start_hermes),
     "voice": (voice_up, restart_voice),
+    "tailscale": (tailscale_up, lambda: subprocess.Popen(["explorer.exe", str(TAILSCALE)])),
 }
 
 
