@@ -4,4 +4,5 @@
     <string name="talk">Talk to Jharvis</string>
     <string name="approvals">Approvals</string>
     <string name="chat">New chat</string>
+    <string name="island_description">Draws the island around the camera hole: new notifications, what is playing, and charging. It reads no screen content; notifications come from Agentic OS chat alerts. Nothing is stored or sent anywhere.</string>
 </resources>

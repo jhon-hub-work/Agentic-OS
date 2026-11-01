@@ -49,3 +49,10 @@ data/skill-lab/
 data/chat-index.json
 desktop/installer/
 config/secrets.json
+
+# Jharvis phone app: fork of Mika (Apache-2.0), its own git repo with an upstream remote
+phone/
+# Android signing: never in git (key lives in D:/Keys/agentic-os)
+*.jks
+*.keystore
+keystore.properties

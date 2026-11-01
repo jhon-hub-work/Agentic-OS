@@ -4,4 +4,11 @@
     <style name="Theme.AgenticOS" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/ice</item>
     </style>
+    <!-- side-button sheet and anything else drawn over the app he was in -->
+    <style name="Theme.AgenticOS.Overlay" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowAnimationStyle">@android:style/Animation.Translucent</item>
+    </style>
 </resources>

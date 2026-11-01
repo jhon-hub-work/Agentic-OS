@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No events, no window content, no screenshots, no key or gesture handling: the service exists only because an
+     accessibility overlay is the one window allowed above the status bar. Notifications reach it from ChatListener. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:canRetrieveWindowContent="false"
+    android:description="@string/island_description" />

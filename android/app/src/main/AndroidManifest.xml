@@ -2,19 +2,69 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- health strip: is the Tailscale VPN up -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Talking to Jharvis; asked the first time the page wants the mic. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- "Appear on top": lets Jharvis open an app while this one is in the background (Android blocks it otherwise) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- Listening for "Jharvis" while another app (Waze) is on screen: a microphone foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- the setup checklist asks for Unrestricted battery directly (a personal sideload: no Play review) -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- redesign (REDESIGN.md): next event at a glance; share uploads as user-initiated jobs that survive reboots;
+         live jobs as promoted ongoing notifications (Now Bar). The last name isn't in the SDK 36 jar, hence a literal. -->
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+    <!-- the app menu's "Delete app" (Android shows its own confirm) -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+    <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
+    <!-- phase 2 (PLAN-PRODUCTION.md): signature haptics (vibration primitives), locked apps behind fingerprint,
+         Driving mode when the car's Bluetooth connects (runtime prompt) -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- "Jharvis, text Mom..." / "call Mom": sent after his spoken yes; contacts turn a name into a number -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+    <!-- Jharvis opens phone apps by name: needs to see launcher apps (Android 11+ hides them otherwise). -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <!-- which app owns a link (Grab, Waze, YouTube), so a link opens there without an "Open with" chooser -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <!-- every app that offers home-screen widgets, for the widgets page picker -->
+        <intent>
+            <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+        </intent>
+    </queries>
 
+    <!-- Processes (ADR-001): the UI (home, dashboard) may crash; :core holds chat alerts, the mic and the send queue and
+         never loads UI code (checked by checkCoreIsolation in build.gradle.kts); :safe is the crash fallback. -->
     <application
+        android:name=".App"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:theme="@style/Theme.AgenticOS"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
         <!-- configChanges: rotation, folding or a theme switch keeps the same WebView (no reload, mic and voice keep going). -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:process=":web"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale">
             <intent-filter>
@@ -23,5 +73,119 @@
             </intent-filter>
             <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
         </activity>
+        <!-- Home screen: press Home and this opens once he picks it (setup checklist). Back does nothing here.
+             Own task (empty affinity, as Launcher3): pressing Home must not close the dashboard opened from it. -->
+        <activity
+            android:name=".ui.HomeActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:launchMode="singleTask"
+            android:stateNotNeeded="true"
+            android:excludeFromRecents="true"
+            android:resumeWhilePausing="true"
+            android:clearTaskOnLaunch="true"
+            android:windowSoftInputMode="adjustNothing"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|mcc|mnc">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- Side button: once Agentic OS is the digital assistant (Settings row), holding it opens this. -->
+        <activity
+            android:name=".ui.AssistActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.jhon.agenticos.assist"
+            android:theme="@style/Theme.AgenticOS.Overlay">
+            <intent-filter>
+                <action android:name="android.intent.action.ASSIST" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <!-- Island: new notifications as a pill at the camera hole. Own process; on once he turns it on in Accessibility. -->
+        <service
+            android:name=".ui.IslandService"
+            android:exported="true"
+            android:label="Agentic OS island"
+            android:process=":island"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/island" />
+        </service>
+        <activity android:name=".ui.ActivityLogActivity" android:exported="false" />
+        <activity android:name=".ui.GlancePrefsActivity" android:exported="false" />
+        <activity android:name=".ui.WidgetPickerActivity" android:exported="false" />
+        <!-- Share to Jharvis, job search or the DYE editor from any app -->
+        <activity
+            android:name=".ui.ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.jhon.agenticos.share"
+            android:theme="@style/Theme.AgenticOS.Overlay">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="audio/*" />
+            </intent-filter>
+        </activity>
+        <service android:name=".core.ShareJob" android:exported="false" android:process=":core"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- Quick Settings tile: Off / Night shift / Driving -->
+        <service android:name=".core.ModeTile" android:exported="true" android:process=":core" android:label="Mode"
+            android:icon="@drawable/ic_fg" android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <activity android:name=".ui.DrawerActivity" android:exported="false" android:windowSoftInputMode="stateVisible|adjustResize" />
+        <activity android:name=".ui.SetupActivity" android:exported="false" />
+        <activity android:name=".ui.AppearanceActivity" android:exported="false" />
+        <activity android:name=".ui.SafeModeActivity" android:exported="false" android:process=":safe" android:excludeFromRecents="true"
+            android:taskAffinity="com.jhon.agenticos.safe" />
+        <!-- an app's own "Add to Home screen" (pinned shortcuts and widgets) lands here -->
+        <activity
+            android:name=".ui.PinActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.jhon.agenticos.pin"
+            android:theme="@style/Theme.AgenticOS.Overlay">
+            <intent-filter>
+                <action android:name="android.content.pm.action.CONFIRM_PIN_SHORTCUT" />
+                <action android:name="android.content.pm.action.CONFIRM_PIN_APPWIDGET" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".ui.HiddenAppsActivity" android:exported="false" />
+        <!-- the car's Bluetooth turns Driving mode on and off (ACL broadcasts are allowed for manifest receivers) -->
+        <receiver android:name=".core.CarReceiver" android:exported="true" android:process=":core">
+            <intent-filter>
+                <action android:name="android.bluetooth.device.action.ACL_CONNECTED" />
+                <action android:name="android.bluetooth.device.action.ACL_DISCONNECTED" />
+            </intent-filter>
+        </receiver>
+        <service android:name=".ListenService" android:exported="false" android:foregroundServiceType="microphone" android:process=":core" />
+        <!-- chat alerts: Jharvis hears about personal chats and answers them with the notification's reply button -->
+        <service android:name=".ChatListener" android:exported="true" android:label="Jharvis chat alerts" android:process=":core"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

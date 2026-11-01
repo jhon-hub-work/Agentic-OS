@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Island (MODES builder): ids for the TalkBack actions on an island alert -->
+<resources>
+    <item name="island_mute_hour" type="id" />
+    <item name="island_mute_day" type="id" />
+</resources>
