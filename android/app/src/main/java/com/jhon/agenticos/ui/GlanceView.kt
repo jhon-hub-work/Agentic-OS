@@ -34,10 +34,11 @@ import java.util.concurrent.Executors
 class GlanceView(c: Context, private val look: Look) : LinearLayout(c) {
     private class Ev(val id: Long, val title: String, val begin: Long, val end: Long)
 
-    private val date = line(28f, look.ink, true).apply { letterSpacing = -0.022f }
-    private val weather = line(17f, look.ink2)
-    private val event = line(17f, look.ink)
-    private val hours = line(15f, look.ink2)
+    private val ink = look.bare  // straight on the wallpaper: its inks follow the wallpaper, not the theme
+    private val date = line(28f, ink.ink, true).apply { letterSpacing = -0.022f }
+    private val weather = line(17f, ink.ink2)
+    private val event = line(17f, ink.ink)
+    private val hours = line(15f, ink.ink2)
     private val still = reducedMotion(c)
     private val datePattern = DateFormat.getBestDateTimePattern(Locale.getDefault(), "EEEEdMMMM")
     private val shown = HashSet<View>()
@@ -58,6 +59,7 @@ class GlanceView(c: Context, private val look: Look) : LinearLayout(c) {
 
     init {
         orientation = VERTICAL
+        clipChildren = false  // the lines' 2 dp glow (legible) spills past their bounds into this 4 dp padding
         setPadding(look.px(4), look.px(4), look.px(4), look.px(4))
         addView(date)
         addView(weather, LayoutParams(-1, -2).apply { topMargin = look.px(6) })
@@ -115,7 +117,7 @@ class GlanceView(c: Context, private val look: Look) : LinearLayout(c) {
         set(weather, weatherLine(t))
         set(event, eventLine(t))
         val on = shift?.isOn(Instant.ofEpochMilli(t)) == true
-        hours.setTextColor(if (on) look.ink else look.ink2); hours.typeface = if (on) look.medium else look.sans
+        hours.setTextColor(if (on) ink.ink else ink.ink2); hours.typeface = if (on) look.medium else look.sans
         set(hours, shift?.line(Instant.ofEpochMilli(t)))
     }
 
@@ -143,9 +145,9 @@ class GlanceView(c: Context, private val look: Look) : LinearLayout(c) {
     private fun weatherLine(t: Long): CharSequence {
         val city = Weather.place(context).name
         val w = now?.takeIf { it.city == city && t - it.at < DateUtils.DAY_IN_MILLIS }
-        weather.setTextColor(if (w == null) look.ink3 else look.ink2)
+        weather.setTextColor(if (w == null) ink.ink3 else ink.ink2)
         if (w == null) return if (now?.city == city) "$city, weather out of date" else "$city, no weather yet"  // always named
-        val s = SpannableStringBuilder().append("${w.temp}°", ForegroundColorSpan(look.ink), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        val s = SpannableStringBuilder().append("${w.temp}°", ForegroundColorSpan(ink.ink), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             .append(" ${Weather.words(w.code)} in $city")
         when {
             t - w.at > 2 * DateUtils.HOUR_IN_MILLIS -> s.append(", as of ${DateFormat.getTimeFormat(context).format(w.at)}")
@@ -157,7 +159,7 @@ class GlanceView(c: Context, private val look: Look) : LinearLayout(c) {
 
     private fun eventLine(t: Long): CharSequence? {
         val allow = !calGranted()
-        event.setTextColor(if (allow) look.navy else look.ink); event.typeface = if (allow) look.medium else look.sans
+        event.setTextColor(if (allow) ink.navy else ink.ink); event.typeface = if (allow) look.medium else look.sans
         if (allow) return "Allow calendar"
         val e = next?.takeIf { it.end > t } ?: return null
         val title = e.title.ifBlank { "Event" }

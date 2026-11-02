@@ -1,6 +1,6 @@
 import { ArrowSquareOut, Briefcase, Broom, Check, Lightning, Robot, Ticket, UsersThree, Waveform, X, type Icon } from '@phosphor-icons/react'
 import { useState } from 'react'
-import { api, timeAgo, type Approval } from '../api'
+import { api, timeAgo, type Approval, type PlainAsk } from '../api'
 import { Empty, ErrorLine, PageHead, Panel, Skeleton, inputCls, usePoll } from '../ui'
 
 // Per kind: icon, and what Approve / Deny mean there (the source's own words).
@@ -29,6 +29,17 @@ export default function Approvals() {
   )
 }
 
+/** Why it's asked and what a no means, in plain words; nothing for old cards without them. */
+export function PlainWhy({ a, className = 'text-sm' }: { a: PlainAsk; className?: string }) {
+  if (!a.why && !a.if_no) return null
+  return (
+    <div className={`flex flex-col gap-1 leading-snug text-ink-2 ${className}`}>
+      {a.why && <p>{a.why}</p>}
+      {a.if_no && <p><span className="text-ink-3">If you say no: </span>{a.if_no}</p>}
+    </div>
+  )
+}
+
 export function Item({ a, onDone }: { a: Approval; onDone: () => void }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -53,9 +64,11 @@ export function Item({ a, onDone }: { a: Approval; onDone: () => void }) {
           Open<ArrowSquareOut size={13} aria-hidden="true" />
         </a>
       </div>
-      <h2 className="text-[15px] font-medium text-ink">{a.title}</h2>
+      <h2 className="text-[15px] font-medium text-ink">{a.what || a.title}</h2>
+      <PlainWhy a={a} />
       {a.detail && (
-        <details className="rounded-2xl border border-white bg-white/55 p-3" open={a.detail.length < 400}>
+        // with plain words up front the technical text stays folded; a draft or post is the thing he judges, so it opens
+        <details className="rounded-2xl border border-white bg-white/55 p-3" open={(!a.what || a.kind === 'job' || a.kind === 'crew') && a.detail.length < 400}>
           <summary className="cursor-pointer text-xs text-ink-3">Details</summary>
           <p className="mt-2 max-h-72 overflow-y-auto whitespace-pre-wrap break-words text-sm leading-relaxed text-ink">{a.detail}</p>
         </details>

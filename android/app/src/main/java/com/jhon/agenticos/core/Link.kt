@@ -54,3 +54,11 @@ fun osHttp(path: String, method: String = "GET", type: String? = null, body: Byt
     if (code !in 200..299) throw IOException("$path $code")
     return c.inputStream.use { it.readBytes() }
 }
+
+/** A multipart/form-data body: the text fields, then one file. Held in memory, so keep files small (photos, voice notes). */
+fun multipart(boundary: String, fields: List<Pair<String, String>>, file: String, type: String, data: ByteArray): ByteArray {
+    val head = StringBuilder()
+    for ((k, v) in fields) head.append("--$boundary\r\nContent-Disposition: form-data; name=\"$k\"\r\n\r\n$v\r\n")
+    head.append("--$boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"$file\"\r\nContent-Type: $type\r\n\r\n")
+    return head.toString().toByteArray() + data + "\r\n--$boundary--\r\n".toByteArray()
+}

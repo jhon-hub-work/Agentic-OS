@@ -1,5 +1,6 @@
 package com.jhon.agenticos
 
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -24,6 +25,8 @@ import com.jhon.agenticos.core.Digest
 import com.jhon.agenticos.core.Link
 import com.jhon.agenticos.core.Mode
 import com.jhon.agenticos.core.Modes
+import com.jhon.agenticos.core.Quiet
+import com.jhon.agenticos.core.QuietState
 import com.jhon.agenticos.core.osHttp
 import org.json.JSONObject
 import java.io.File
@@ -45,13 +48,18 @@ class ChatListener : NotificationListenerService() {
     private val bell = Semaphore(0)  // wakes the outbox loop early: a chat went out, or the screen came on
     @Volatile private var quietRounds = 0  // outbox rounds since the screen went off with nothing happening
     private var dndOn: Boolean? = null  // what we last asked of Do Not Disturb (outbox thread only); null = nothing yet
-    private val screenOn = object : BroadcastReceiver() { override fun onReceive(c: Context, i: Intent) = wake() }
+    private val asks = ArrayList<Pair<Boolean, Long>>()  // our Do Not Disturb requests of the last 10 s: their echoes aren't his change
+    @Volatile private var catchUp = false  // just (re)connected: the next round looks for a DND change made while away
+    @Volatile private var unlocked = false  // he unlocked since the last quiet poll (not counted while quiet is on)
+    private val screenOn = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) { if (i.action == Intent.ACTION_USER_PRESENT) unlocked = true; wake() }
+    }
     private val badgeTask = Runnable { guard("badges") { badges() } }
 
     override fun onCreate() {
         super.onCreate()
         work = Handler(HandlerThread("chat-notes").apply { start() }.looper)
-        guard("screen receiver") { registerReceiver(screenOn, IntentFilter(Intent.ACTION_SCREEN_ON), RECEIVER_NOT_EXPORTED) }
+        guard("screen receiver") { registerReceiver(screenOn, IntentFilter(Intent.ACTION_SCREEN_ON).apply { addAction(Intent.ACTION_USER_PRESENT) }, RECEIVER_NOT_EXPORTED) }
     }
 
     override fun onDestroy() {
@@ -63,6 +71,7 @@ class ChatListener : NotificationListenerService() {
 
     override fun onListenerConnected() = guard("connect") {
         connected = true
+        catchUp = true
         if (!looping) {
             looping = true
             Thread({ try { outboxLoop() } catch (e: Throwable) { Log.w("Jharvis", "outbox loop died", e) } finally { looping = false } }, "chat-outbox").start()
@@ -85,6 +94,20 @@ class ChatListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) = guard("removed") { scheduleBadges() }
+
+    /** Do Not Disturb or Sleep mode changed by him or the phone's schedule: the PC's quiet mode follows. Our own
+     *  requests (Night shift, Driving, the PC's "dnd") echo back here and are skipped. */
+    override fun onInterruptionFilterChanged(filter: Int) = guard("dnd changed") {
+        if (filter == INTERRUPTION_FILTER_UNKNOWN) return@guard
+        val on = filter != INTERRUPTION_FILTER_ALL
+        val own = own(on)
+        work?.post { guard("quiet") { Quiet.seenDnd = on; if (reportDnd(on, own, Quiet.state())) phoneChanged(on) } }
+    }
+
+    private fun own(on: Boolean) = synchronized(asks) { ownDnd(on, asks.toList(), System.currentTimeMillis()) }
+
+    /** He or the phone's schedule changed Do Not Disturb: the PC's quiet mode follows. */
+    private fun phoneChanged(on: Boolean) { Quiet.phoneDnd(on); wake() }
 
     private inline fun guard(what: String, f: () -> Unit) { try { f() } catch (e: Throwable) { Log.w("Jharvis", "$what failed", e) } }  // a bug here must not crash :core
 
@@ -167,14 +190,27 @@ class ChatListener : NotificationListenerService() {
                 mode = Modes.current()
                 followModeDnd(mode)
             } catch (e: Exception) { Log.w("Jharvis", "mode check failed", e) }
+            try { if (Quiet.on()) unlocked = false } catch (_: Exception) {}  // an unlock during quiet isn't the first one after it
             try {
                 if (Link.queue.flush() == 0) {  // PC still not taking queued ones: no point asking it
+                    try {
+                        Quiet.polled(String(osHttp("/api/jharvis/quiet", timeoutMs = 15000)), unlocked, present(pm))?.let { s ->
+                            unlocked = false
+                            dndCatchUp(s, Quiet.askedDnd)?.let { on -> dnd(on, mode) }  // a "dnd" item missed while offline or dead
+                        }
+                    } catch (e: Exception) { Log.w("Jharvis", "quiet check failed", e) }  // kept apart: the outbox still runs
                     val items = JSONObject(String(osHttp("/api/phone/outbox"))).getJSONArray("items")
                     if (items.length() > 0) quietRounds = 0
                     for (k in 0 until items.length()) {
                         val it = items.getJSONObject(k)
-                        val result = if (it.getString("kind") == "reply") reply(it.getString("conv"), it.getString("text"))
-                            else say(it.getString("text"))
+                        val kind = it.getString("kind")
+                        // sent by the PC just before quiet began: kept for the summary instead (shown if it can't be kept)
+                        val result = if (holdOnPhone(kind, Quiet.on()) && Quiet.hold(kind, it.getString("text"))) "held" else when (kind) {
+                            "reply" -> reply(it.getString("conv"), it.getString("text"))
+                            "notify" -> notify(it.getString("text"))  // a shade note only, never spoken
+                            "dnd" -> dnd(it.getBoolean("on"), mode)
+                            else -> say(it.getString("text"))
+                        }
                         // queued: a result lost to a dropped line would make the PC hand the same reply out again
                         Link.queue.add("/api/phone/outbox/${it.getString("id")}", JSONObject().put("result", result).toString())
                     }
@@ -191,14 +227,35 @@ class ChatListener : NotificationListenerService() {
 
     private fun beat() { try { Link.beat("listener") } catch (e: Exception) { Log.w("Jharvis", "heartbeat not written", e) } }
 
+    /** He's using the phone right now: screen on and unlocked. */
+    private fun present(pm: PowerManager?) = pm?.isInteractive == true && getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == false
+
     /** Do Not Disturb follows the mode, only when Jhon turned it on ("mode_dnd" in mode.json): Night shift and Driving
-     *  ask for priority only, Off for everything again. Chats still reach us whatever the filter is. */
+     *  ask for priority only, Off for everything again. The PC's quiet mode keeps it on too. Chats still reach us
+     *  whatever the filter is. */
     private fun followModeDnd(mode: Mode) {
-        val on = try { JSONObject(File(Link.dir, "mode.json").readText()).optBoolean("mode_dnd") } catch (_: Exception) { false }
-        val want = on && mode != Mode.OFF
-        if (dndChange(want, dndOn, Build.VERSION.SDK_INT))
-            requestInterruptionFilter(if (want) INTERRUPTION_FILTER_PRIORITY else INTERRUPTION_FILTER_ALL)  // throws when unbound: retried next round
+        // a change made while the listener was unbound or :core was dead never reached onInterruptionFilterChanged
+        val away = if (catchUp) { catchUp = false; currentInterruptionFilter.let { if (it == INTERRUPTION_FILTER_UNKNOWN) null else it != INTERRUPTION_FILTER_ALL } } else null
+        dndOn = dndRound(away, ::own, modeDnd(mode), dndOn, Build.VERSION.SDK_INT, ::ask, ::phoneChanged)
+    }
+
+    private fun modeDnd(mode: Mode) = mode != Mode.OFF &&
+        try { JSONObject(File(Link.dir, "mode.json").readText()).optBoolean("mode_dnd") } catch (_: Exception) { false }
+
+    /** The PC's quiet mode went on or off from the chip or Jharvis: Do Not Disturb follows, asked even when we think
+     *  it already is (he may have set it himself). Night shift's own Do Not Disturb stays. */
+    private fun dnd(on: Boolean, mode: Mode): String {
+        Quiet.askedDnd = on
+        val want = on || modeDnd(mode)
+        ask(want)
         dndOn = want
+        return "done"
+    }
+
+    private fun ask(on: Boolean) {
+        val now = System.currentTimeMillis()
+        synchronized(asks) { asks.removeAll { now - it.second >= 10_000L }; asks += on to now }  // before the call: its echo can arrive before it returns
+        requestInterruptionFilter(if (on) INTERRUPTION_FILTER_PRIORITY else INTERRUPTION_FILTER_ALL)  // throws when unbound: retried next round
     }
 
     private fun reply(conv: String, text: String): String {
@@ -217,6 +274,11 @@ class ChatListener : NotificationListenerService() {
     private fun say(text: String): String {
         if (Modes.quietChats()) return Modes.quietNote(this, text)  // Modes (builder D): Night shift, a silent shade note instead
         if (ListenService.announce(text)) return "spoken"
+        return notify(text)
+    }
+
+    /** A notification he can tap, opening the dashboard. */
+    private fun notify(text: String): String {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel("chats", "Jharvis: your chats", NotificationManager.IMPORTANCE_HIGH))
         val open = PendingIntent.getActivity(this, 0, Intent().setClassName(this, "com.jhon.agenticos.MainActivity"), PendingIntent.FLAG_IMMUTABLE)  // literal: same class under .dev
@@ -239,6 +301,41 @@ internal fun outboxWait(quietRounds: Int, screenOn: Boolean, driving: Boolean): 
     else -> 60_000L
 }
 
-/** Ask Do Not Disturb again only on a change. At start-up "off" is asked only on API 35+, where it just ends our own
- *  rule (left on by a :core restart); older Android would end a DND he set himself. */
-internal fun dndChange(want: Boolean, last: Boolean?, sdk: Int): Boolean = want != last && (want || last == true || sdk >= 35)
+/** Ask Do Not Disturb again only on a change. "Off" on older Android ends any DND, so it's asked there only after we
+ *  turned it on, and never while quiet is on from his own DND (his: Night shift ending must not end his). On API 35+
+ *  it just ends our own rule (even one left on by a :core restart). */
+internal fun dndChange(want: Boolean, last: Boolean?, sdk: Int, his: Boolean = false): Boolean =
+    want != last && (want || sdk >= 35 || (last == true && !his))
+
+/** A Do Not Disturb change matching any request we made in the last 10 s is our own request coming back. */
+internal fun ownDnd(on: Boolean, asks: List<Pair<Boolean, Long>>, now: Long): Boolean = asks.any { it.first == on && now - it.second < 10_000L }
+
+/** Tell the PC about this Do Not Disturb edge: not our own echo, or our own "off" while the PC still has quiet on by
+ *  "phone" (API 35+: his schedule ended under our rule, so only our "off" let the filter reach ALL). An own "on" stays ours. */
+internal fun reportDnd(on: Boolean, own: Boolean, pc: QuietState): Boolean = !own || (!on && pc.on && pc.by == "phone")
+
+/** On reconnect: Do Not Disturb isn't what the listener last saw, and it's worth reporting, so it changed while away. */
+internal fun missedDnd(now: Boolean, seen: Boolean?, own: Boolean, pc: QuietState = QuietState()): Boolean =
+    seen != null && now != seen && reportDnd(now, own, pc)
+
+/** One outbox round's Do Not Disturb step. away: the filter now, read on the first round after a (re)connect, else null.
+ *  That check comes before any request: a fresh :core asking again for what the PC last wanted would turn his own
+ *  "off", made while it was gone, back on and hide it. Returns what we now want of Do Not Disturb. */
+internal fun dndRound(away: Boolean?, own: (Boolean) -> Boolean, modeDnd: Boolean, last: Boolean?, sdk: Int,
+                      ask: (Boolean) -> Unit, report: (Boolean) -> Unit): Boolean {
+    if (away != null) {
+        if (missedDnd(away, Quiet.seenDnd, own(away), Quiet.state())) report(away)
+        Quiet.seenDnd = away
+    }
+    val want = modeDnd || Quiet.askedDnd
+    val q = Quiet.state()
+    if (dndChange(want, last, sdk, his = q.on && q.by == "phone")) ask(want)
+    return want
+}
+
+/** The PC's quiet, set from the chip or Jharvis, differs from what it last asked of Do Not Disturb (its "dnd" item
+ *  expired or never came): what to ask now, or null. A change by "phone" is already on the phone. */
+internal fun dndCatchUp(pc: QuietState, asked: Boolean): Boolean? = if (pc.by.isNotEmpty() && pc.by != "phone" && pc.on != asked) pc.on else null
+
+/** A say or notify the PC sent just before quiet began is kept for the summary, not shown. */
+internal fun holdOnPhone(kind: String, quiet: Boolean) = quiet && (kind == "say" || kind == "notify")

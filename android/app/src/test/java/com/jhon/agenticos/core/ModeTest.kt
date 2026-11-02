@@ -18,7 +18,7 @@ class ModeTest {
 
     @Before fun tmp() {
         val d = Files.createTempDirectory("aos").toFile()
-        Modes.file = File(d, "mode.json"); Modes.carFile = File(d, "car.json"); Snooze.file = File(d, "snooze.json")
+        Modes.file = File(d, "mode.json"); Modes.carFile = File(d, "car.json"); Snooze.file = File(d, "snooze.json"); Quiet.file = File(d, "quiet.json")
     }
     // atomicWrite's rename can't replace a file on Windows (it can on Android), so a test writes through it once
     private fun seed(s: ModeState) = Modes.file!!.writeText(s.json())
@@ -106,6 +106,13 @@ class ModeTest {
         seed(ModeState(Mode.NIGHT, Long.MAX_VALUE))
         assertTrue(Modes.quietChats(at(14)))
         assertEquals(false, Modes.skipChat(group = true, now = at(14)))  // still sent: Jharvis keeps the record
+    }
+
+    @Test fun sleepKeepsChatsQuietWhateverTheMode() {
+        Quiet.file!!.writeText("""{"on": true, "summary": "none"}""")
+        assertTrue(Modes.quietChats(at(13)))
+        Modes.set(Mode.DRIVING, at(12))
+        assertTrue(Modes.quietChats(at(13)))
     }
 
     @Test fun drivingKeepsRepliesToOneShortSentence() {

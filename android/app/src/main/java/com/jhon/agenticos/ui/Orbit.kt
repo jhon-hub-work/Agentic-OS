@@ -149,7 +149,7 @@ object LaunchCounts {
  *  onLaunch gets an app key (AppKey): a plain package for main-profile apps with one launcher activity. Locked apps
  *  have already passed their lock prompt when onLaunch runs. */
 class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon: View, pkg: String) -> Unit,
-                private val onClose: () -> Unit) : FrameLayout(c) {
+                private val onClose: () -> Unit) : FrameLayout(c), AppLayout {
 
     private inner class Ring(val index: Int, val cap: Int) {
         val layer = FrameLayout(context)
@@ -170,7 +170,8 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
 
     private val still = reducedMotion(c)
     /** Press and hold an icon: its app menu (home supplies what Add to dock and a change mean). */
-    var menuActions: AppMenu.Actions? = null
+    override var menuActions: AppMenu.Actions? = null
+    override val view: View get() = this
     private var hiddenList: List<AppEntry> = emptyList()  // hidden apps: off the rings, still in search
     private val slop = ViewConfiguration.get(c).scaledTouchSlop
     private val iconPx = look.px(54)
@@ -207,7 +208,7 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
     private var pillBlur = 0f; private var allBlur = 0f; private var layerBlur = 0f
 
     /** 0 = folded into the core, 1 = open. Home's spring drives it. */
-    var progress = 0f
+    override var progress = 0f
         set(v) { field = v; applyProgress() }
 
     private val search: Spring = Spring(0f, 0.001f) { applySearch() }
@@ -276,8 +277,17 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
         setOnApplyWindowInsetsListener { _, i -> useInsets(i); i }
         // the keyboard slides: the result list's bottom follows it frame by frame
         setWindowInsetsAnimationCallback(object : WindowInsetsAnimation.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+            private var imeWas = false  // the keyboard was up as this slide began
+            override fun onPrepare(a: WindowInsetsAnimation) {
+                if (a.typeMask and WindowInsets.Type.ime() != 0) imeWas = rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+            }
             override fun onProgress(i: WindowInsets, running: MutableList<WindowInsetsAnimation>): WindowInsets { useInsets(i); return i }
-            override fun onEnd(a: WindowInsetsAnimation) { rootWindowInsets?.let { useInsets(it) } }
+            override fun onEnd(a: WindowInsetsAnimation) {
+                rootWindowInsets?.let { useInsets(it) }
+                // the keyboard slid away (Back hides it before our callback sees Back): search is over if the field is empty
+                if (a.typeMask and WindowInsets.Type.ime() != 0 && imeWas && rootWindowInsets?.isVisible(WindowInsets.Type.ime()) != true
+                    && progress > 0.5f && box.text.isNullOrBlank()) onSearchLeft?.invoke()
+            }
         })
     }
 
@@ -393,6 +403,7 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
                 gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
                 setPadding(look.px(2), look.px(4), look.px(2), 0)
                 importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+                look.legible(this)  // on the calmed wallpaper, not glass
             }, LinearLayout.LayoutParams(-1, -2))
         }
         badgeViews += Triple(cell, pill, app)
@@ -493,7 +504,8 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
         }
         if (!still) {
             val t = ((p - delay - 0.025f) / 0.74f).coerceIn(0f, 1f)
-            ring.blurNow = setBlur(ring.layer, look.px(8) * (1 - t), ring.blurNow)
+            // its icons move every frame, so this blur re-renders every frame: none while they're all still see-through
+            ring.blurNow = setBlur(ring.layer, if (t < 0.04f) 0f else look.px(8) * (1 - t), ring.blurNow)
         }
     }
 
@@ -524,6 +536,9 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
 
     /** Which ring a point is on, if the orbit is open and not searching. Home can use it to leave ring drags alone. */
     fun onRing(x: Float, y: Float): Boolean = ringAt(x, y) != null
+
+    /** A drag on a ring spins it; with results up, the list scrolls. Elsewhere a drag down is home's (it closes). */
+    override fun ownsTouch(x: Float, y: Float) = progress >= 0.95f && (search.target > 0f || onRing(x, y))
 
     private fun ringAt(x: Float, y: Float): Ring? {
         if (progress < 0.95f || search.target > 0f) return null
@@ -905,6 +920,7 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
             gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
             setPadding(look.px(2), look.px(6), look.px(2), 0)
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+            look.legible(this)
         }, LinearLayout.LayoutParams(-1, -2))
         showBadge(this, pill, a, markNew || isNew(a, System.currentTimeMillis()))
         isClickable = true; look.press(this, 0.9f)
@@ -946,13 +962,14 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
         rememberQuery()
         from.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
         Loader.net {
-            val online: Boolean? = try { SmartSearch.ask(q) } catch (_: Exception) { null }
+            var missed = false  // a yes is never queued: the PC couldn't be reached, so it wasn't sent
+            val online: Boolean? = try { SmartSearch.ask(q) } catch (_: SmartSearch.NotReached) { missed = true; null } catch (_: Exception) { null }
             Loader.main.post {
                 askBusy = false
                 if (!isAttachedToWindow) return@post
                 if (online == true) context.launchFrom(from, Intent(context, MainActivity::class.java).setData(Uri.parse("${Link.ORIGIN}/#/home")))
                 else {
-                    askNote = q to if (online == null) "Couldn't save that. Try again." else "Saved. Jharvis gets it when the PC is back."
+                    askNote = q to when { missed -> SmartSearch.NOT_REACHED; online == null -> "Couldn't save that. Try again."; else -> "Saved. Jharvis gets it when the PC is back." }
                     if (box.text.toString().trim() == q) render(q)
                 }
             }
@@ -977,7 +994,11 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
 
     // Back while searching clears the search and lets the field go (the rings come back); home's own Back closes the orbit
     private var backOn = false
-    private fun backOut() { box.setText(""); hideIme(); emptyState() }
+    private fun backOut() { box.setText(""); hideIme(); if (onSearchLeft?.invoke() != true) emptyState() }
+
+    /** Home's say when search ends with the field empty: true = Home took it (another layout is his, so it goes back
+     *  there or to Home) and the rings never show. */
+    var onSearchLeft: (() -> Boolean)? = null
     private val back: OnBackInvokedCallback = if (Build.VERSION.SDK_INT >= 34) object : OnBackAnimationCallback {
         override fun onBackProgressed(e: BackEvent) { if (!still) search.snap(1f - 0.3f * e.progress) }  // results ease back with the gesture
         override fun onBackCancelled() { if (!still) search.to(1f, response = 0.35f, damping = 1f) }
@@ -996,7 +1017,7 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
     /** Re-rank apps and re-read hidden apps, badges, pins and recent searches, all on the loader thread. The full app
      *  list is read once per process and then kept live by the LauncherApps callback, so this is cheap on every
      *  resume. A changed order waits until the orbit is shut. */
-    fun load() {
+    override fun load() {
         val app = context.applicationContext
         val cap = capacity
         val g = ++loadGen
@@ -1007,7 +1028,8 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
             val ver = Apps.version
             val hidden = HiddenApps.all(app)
             val byKey = all.associateBy { it.key }
-            val dock = dockApps(app).filter { it in byKey && it !in hidden }
+            // the dock stores packages; an app with two launcher icons is keyed by its component, so map it to that key
+            val dock = dockApps(app).map { if (it in byKey) it else AppKey.forPackage(app, it) }.filter { it in byKey && it !in hidden }
             val order = LaunchCounts.ranked(app, dock + all.map { it.key }.filter { it !in dock && it !in hidden })
             val got = order.mapNotNull { byKey[it] }
             val hid = all.filter { it.key in hidden }
@@ -1035,7 +1057,7 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
     }
 
     /** Called once as an open starts: anything that arrived while it was shut is laid out before the icons fly. */
-    fun opening() {
+    override fun opening() {
         pending?.let { apps = it; pending = null; build() }
         hideTag()
     }
@@ -1044,7 +1066,7 @@ class OrbitView(c: Context, private val look: Look, private val onLaunch: (icon:
     fun openSearch() { opening(); if (progress > 0.001f) showIme() else wantIme = true }
 
     /** Clear search, rings back to rest. */
-    fun reset() {
+    override fun reset() {
         removeCallbacks(fetchMore)
         box.setText("")
         hideIme(); hideTag()

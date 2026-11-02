@@ -248,19 +248,20 @@ class AppearanceActivity : Activity() {
         val dm = resources.displayMetrics
         val main = Handler(Looper.getMainLooper())
         Thread {
-            val dark = try { copyIn(uri, max(dm.widthPixels, dm.heightPixels)) } catch (_: Throwable) { null }
+            val lum = try { copyIn(uri, max(dm.widthPixels, dm.heightPixels)) } catch (_: Throwable) { null }
             main.post {
                 if (isDestroyed) return@post
-                if (dark == null) return@post  // unreadable picture: nothing changes
+                if (lum == null) return@post  // unreadable picture: nothing changes
                 Wallpaper.forget()
-                change { putString(Appearance.WALL, Appearance.PHOTO); putBoolean(Appearance.PHOTO_DARK, dark) }
+                // dark when white text would out-contrast black on its average (luminance under ~0.18)
+                change { putString(Appearance.WALL, Appearance.PHOTO); putBoolean(Appearance.PHOTO_DARK, lum < 0.179); putFloat(Appearance.PHOTO_LUM, lum.toFloat()) }
             }
         }.start()
     }
 
     /** Decodes his picture upright (ImageDecoder applies the camera's rotation), about screen-sized, saves it as our
-     *  own JPEG (temp file, then rename, so a half-written file never shows) and says whether it reads as dark. */
-    private fun copyIn(uri: Uri, longest: Int): Boolean {
+     *  own JPEG (temp file, then rename, so a half-written file never shows) and returns its average luminance. */
+    private fun copyIn(uri: Uri, longest: Int): Double {
         val bmp = ImageDecoder.decodeBitmap(ImageDecoder.createSource(contentResolver, uri)) { d, info, _ ->
             d.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
             var s = 1
@@ -270,11 +271,7 @@ class AppearanceActivity : Activity() {
         val tmp = File(filesDir, Appearance.PHOTO_FILE + ".tmp")
         tmp.outputStream().use { bmp.compress(Bitmap.CompressFormat.JPEG, 90, it) }
         if (!tmp.renameTo(Wallpaper.file(this))) throw IllegalStateException("rename")
-        val tiny = Bitmap.createScaledBitmap(bmp, 16, 16, true)
-        var sum = 0.0
-        for (yy in 0 until 16) for (xx in 0 until 16) sum += Themes.luminance(tiny.getPixel(xx, yy))
-        // dark when white text would out-contrast black on its average (luminance under ~0.18)
-        return sum / 256 < 0.179
+        return Appearance.lum(bmp)
     }
 
     private fun systemColours(): IntArray? = try {

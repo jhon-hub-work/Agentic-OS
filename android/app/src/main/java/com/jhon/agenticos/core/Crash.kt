@@ -119,6 +119,11 @@ class Crash(private val file: File, private val limit: Int = 2, private val wind
             Files.move(tmp.toPath(), f.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
         }
 
+        /** An exits.log line worth showing as a problem: the app crashed, froze or was stopped for misbehaving.
+         *  Updates, swipes away and memory trims are routine. */
+        fun isProblem(line: String) = PROBLEMS.any { " $it pid " in line }
+        private val PROBLEMS = listOf("crash", "native crash", "ANR", "init failure", "excessive resource use")
+
         fun exitLine(time: Long, process: String, reason: Int, pid: Int, desc: String?, zone: ZoneId = ZoneId.systemDefault()): String {
             val at = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone).format(Instant.ofEpochMilli(time))
             val why = desc?.replace(Regex("\\s+"), " ")?.trim()?.take(160)?.takeIf { it.isNotEmpty() }

@@ -34,6 +34,13 @@ class Look(val c: Context) {
     val ok = theme.ok
     val warn = theme.warn
     val bad = theme.bad
+    val accentInk = Themes.readable(theme, accent)  // the accent as a word: deepened where the accent itself is too faint
+    private val onWall = Appearance.prefs(c).getString(Appearance.WALL, Appearance.FROST).let { it == Appearance.PHOTO || it == Appearance.SYSTEM }
+    /** Inks for words straight on his photo or the phone wallpaper (Home's glance, the empty line): they follow the
+     *  wallpaper's lightness, not the theme's. On the frost, the theme itself. */
+    val bare: ThemeSpec by lazy { Appearance.bare(c, theme) }  // screens that never write on the wallpaper skip the lookup
+    /** Under the needs cards over a wallpaper: the theme's glass, strong enough for its ink over any picture. 0 on the frost. */
+    val cardTint = if (onWall) Themes.cardTint(theme, accent) else 0
     val hairline = inkA(31)             // separators: ink at 12%
     val pressed = inkA(22)              // row highlight under the finger
     val font: FontSpec = Themes.font(Appearance.prefs(c).getString(Appearance.FONT, null))
@@ -61,6 +68,10 @@ class Look(val c: Context) {
     /** Frosted glass: translucent fill over the blurred frost, with a bright hairline where light catches the edge. */
     fun glassCard(radiusDp: Int = 22) = round(glass, radiusDp, glassEdge)
 
+    /** Glass for things that sit on the wallpaper (the needs pill, home's chips and gear, the dock): over his photo
+     *  or the phone wallpaper the cards' strong theme tint, so grey words read on any picture; plain glass on the frost. */
+    fun wallGlass(radiusDp: Int) = if (cardTint != 0) round(cardTint, radiusDp, glassEdge) else glassCard(radiusDp)
+
     /** The outer tray of a double bezel (dashboard .glass-shell): pad it 6 dp and put a glassCard(radius - 6) inside. */
     fun shell(radiusDp: Int = 28) = round(shellFill, radiusDp, shellEdge)
 
@@ -80,12 +91,18 @@ class Look(val c: Context) {
         press(this); setOnClickListener { onClick() }
     }
 
-    /** Text drawn straight on his photo or the phone wallpaper (Home's glance, the empty line): a soft halo in the
-     *  ground colour so the ink separates from a busy picture. On the frost it needs none. */
+    /** Text drawn straight on his photo or the phone wallpaper (Home's glance, the empty line, orbit labels): a 2 dp
+     *  glow of the opposite lightness, so the ink lifts off a busy patch. Small, so it never merges into a box; the
+     *  view needs that much room around its letters (padding, or clipChildren off on its parent). Text on glass, chips
+     *  or the dock gets none; on the frost nothing needs it. Call after the text colour is set. */
     fun legible(t: TextView) {
-        val wall = Appearance.prefs(c).getString(Appearance.WALL, Appearance.FROST)
-        if (wall == Appearance.PHOTO || wall == Appearance.SYSTEM) t.setShadowLayer(px(6).toFloat(), 0f, 0f, withAlpha(ground, 230))
+        if (!onWall) return
+        val dark = Themes.luminance(t.currentTextColor) < 0.179
+        t.setShadowLayer(px(2).toFloat(), 0f, 0f, if (dark) Color.argb(150, 255, 255, 255) else Color.argb(120, 0, 0, 0))
     }
+
+    /** The halo itself, whatever the wallpaper: Jharvis's overlay floats its words over any app. */
+    fun halo(t: TextView) = t.setShadowLayer(px(6).toFloat(), 0f, 0f, withAlpha(ground, 230))
 
     /** Status and navigation bar icons that read on this ground, and a window background that matches it (no ice
      *  flash under a dark theme). Call after setContentView: the window has no insets controller before it. */

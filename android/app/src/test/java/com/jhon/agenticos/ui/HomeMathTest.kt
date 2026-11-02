@@ -7,6 +7,14 @@ import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class HomeMathTest {
+    // Jhon, 2 Nov: pull down for search on Home, press Back, and Orbit showed although his layout is Honeycomb
+    @Test fun backFromSearchGoesWhereHeCameFrom() {
+        assertEquals(HomeMath.BACK_TO_RINGS, HomeMath.searchBack(layoutIsOrbit = true, fromLayout = false))  // Orbit: its rings
+        assertEquals(HomeMath.BACK_TO_RINGS, HomeMath.searchBack(layoutIsOrbit = true, fromLayout = true))
+        assertEquals(HomeMath.BACK_HOME, HomeMath.searchBack(layoutIsOrbit = false, fromLayout = false))      // pulled down on Home
+        assertEquals(HomeMath.BACK_TO_LAYOUT, HomeMath.searchBack(layoutIsOrbit = false, fromLayout = true))  // the layout's search pill
+    }
+
     @Test fun releaseGoesWhereTheFlickWasHeading() {
         assertEquals(1f, HomeMath.settle(0.6f, 0f))     // past halfway, let go still: opens
         assertEquals(0f, HomeMath.settle(0.4f, 0f))     // short of halfway: shuts

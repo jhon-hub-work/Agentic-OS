@@ -89,4 +89,12 @@ class SearchTest {
         assertTrue(SmartSearch.parsePins("not json").isEmpty())
         assertTrue(SmartSearch.parsePins(null).isEmpty())
     }
+
+    @Test fun aYesIsNeverQueued() {
+        for (q in listOf("yes", "  Yes!", "Jharvis, yes", "jarvis yeah do it", "yep", "Yup", "approve", "Approved", "go ahead please",
+                "ok", "Okay sure", "sure", "sige", "oo", "do it", "send it", "go", "Hey Jharvis, yes"))
+            assertTrue(q, SmartSearch.isYes(q))
+        for (q in listOf("yesterday's bills", "what did yes mean", "no", "eyes test", "approval status", "go home", "jharvis", "oops", "okra price", "surely not", "door code"))
+            assertTrue(q, !SmartSearch.isYes(q))
+    }
 }

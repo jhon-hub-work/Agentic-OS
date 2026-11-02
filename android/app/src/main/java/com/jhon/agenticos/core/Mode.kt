@@ -96,8 +96,8 @@ object Modes {
     /** Dock apps per mode; an empty slot falls back to the normal dock ("dock$slot"). */
     fun dockKey(slot: Int, m: Mode = current()): String = if (m == Mode.OFF) "dock$slot" else "dock_${m.name.lowercase()}_$slot"
 
-    /** Night shift: Jharvis doesn't speak or pop chats, and the island skips them. */
-    fun quietChats(now: Long = System.currentTimeMillis()) = current(now) == Mode.NIGHT
+    /** Night shift or Sleep (Quiet): Jharvis doesn't speak or pop chats, and the island skips them. */
+    fun quietChats(now: Long = System.currentTimeMillis()) = current(now) == Mode.NIGHT || Quiet.on()
 
     /** Driving: group chats aren't sent to the PC at all, so Jharvis never reads them out; personal ones still are. */
     fun skipChat(group: Boolean, now: Long = System.currentTimeMillis()) = group && current(now) == Mode.DRIVING

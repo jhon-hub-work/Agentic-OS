@@ -35,6 +35,15 @@ class MotionGlassTest {
         assertEquals(0, BlurMath.steps(10f, 0f))
     }
 
+    @Test fun blurLevelsThinOutAsTheyGrow() {
+        assertEquals(0, BlurMath.coarse(0)); assertEquals(0, BlurMath.coarse(1))  // under a dp: no blur at all
+        for (n in 2..8) assertEquals(n, BlurMath.coarse(n))
+        assertEquals(10, BlurMath.coarse(9)); assertEquals(60, BlurMath.coarse(56)); assertEquals(50, BlurMath.coarse(54))
+        val levels = (0..56).map { BlurMath.coarse(it) }
+        assertEquals(levels.sorted(), levels)  // never steps back while a blur grows
+        assertEquals(19, levels.distinct().size)  // a 28 dp ramp (56 half-dp steps): 18 blur levels plus none
+    }
+
     @Test fun boxBlurKeepsFlatColourAndSpreadsAPoint() {
         val w = 21; val h = 15
         val flat = IntArray(w * h) { 0xFF336699.toInt() }

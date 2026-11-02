@@ -26,7 +26,7 @@ export type SessionItem = Omit<Session, 'messages'> & { message_count: number; l
 export type Job ={ id: string; name: string; kind: 'agent' | 'team' | 'skill'; agent: AgentName; prompt: string; skill?: string | null; cron: string; enabled: boolean; last_run: string | null; description?: string }
 export type JobEvent = { type: string; job_id?: string; name?: string; output?: string; trigger?: string; timestamp: string }
 
-export type JobPost = { id: string; title: string; company: string; url: string; source: string; pay?: string; score?: number; reason?: string; lane: string; status: 'new' | 'queued' | 'drafted' | 'draft_blocked' | 'needs_you' | 'approved' | 'applying' | 'handoff' | 'closed' | 'skipped' | 'applied' | 'replied'; draft: string; applied_at?: string; follow_up?: 'due' | 'done'; followup_draft?: string; followup_problem?: string; problem?: string; apply_result?: string; needs_why?: string; found: string }
+export type JobPost = { id: string; title: string; company: string; url: string; source: string; pay?: string; score?: number; reason?: string; lane: string; status: 'new' | 'queued' | 'drafted' | 'draft_blocked' | 'needs_you' | 'approved' | 'applying' | 'handoff' | 'closed' | 'skipped' | 'applied' | 'replied'; draft: string; applied_at?: string; follow_up?: 'due' | 'done'; followup_draft?: string; followup_problem?: string; problem?: string; apply_result?: string; applied_by?: string; needs_why?: string; found: string }
 export type Plugin = { id: string; name: string; description: string; enabled: boolean; skills: boolean; mcp: Record<string, unknown> }
 export type LabRun = { id: string; request: string; rounds: number; status: 'running' | 'passed' | 'failed' | 'blocked' | 'error'; name: string; source: string; scores: number[]; created: string; installed_to?: string; blocked_by?: string; override?: boolean; messages: { at: string; who: 'you' | 'lab'; text: string }[] }
 export type TicketSeverity = 'P1' | 'P2' | 'P3' | 'P4'
@@ -40,7 +40,9 @@ export type ClaudeGuard = { usage: GuardUsage | null; blocked: string | null; de
 export type LimitWindow = { name: string; used_pct?: number; used?: number; limit?: number; resets_at?: number }
 export type AgentLimit = { label: string; plan: string; windows: LimitWindow[]; source: 'api' | 'estimate' | 'not reported'; read_at: number | null; calls_today: number; resting_until: number | null; limit_hit_at?: number }
 /** One thing an agent wants Jhon's yes on (GET /api/approvals); id = kind:ref, decided through the source's own path. */
-export type Approval = { id: string; kind: 'ticket' | 'job' | 'jharvis' | 'skill' | 'tidy' | 'crew' | 'meeting'; title: string; detail: string; agent: string; created: string; link: string; url?: string; expires?: string }
+export type Approval = { id: string; kind: 'ticket' | 'job' | 'jharvis' | 'skill' | 'tidy' | 'crew' | 'meeting'; title: string; detail: string; agent: string; created: string; link: string; url?: string; expires?: string } & PlainAsk
+/** The plain words of an ask (1 Nov): what it does, why, what happens on a no. Old cards may not have them. */
+export type PlainAsk = { what?: string; why?: string; if_no?: string }
 export type JobRun = { started: string; finished?: string; fetched: number; new: number; kept: number; scored: number; drafted: number; needs_you: number; errors: string[] }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
@@ -123,7 +125,7 @@ export const api = {
   jobsBoard: (who = '') => req<{ jobs: JobPost[]; runs: JobRun[]; running: boolean }>(`/api/jobs?who=${who}`),
   runJobSearch: (who = '') => req<unknown>(`/api/jobs/run?who=${who}`, { method: 'POST' }),
   addIndeedJob: (url: string) => req<JobPost>('/api/jobs/add', { method: 'POST', body: JSON.stringify({ url }) }),
-  decideJob: (id: string, decision: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up', who = '') =>
+  decideJob: (id: string, decision: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up' | 'closed' | 'skip_followup', who = '') =>
     req<JobPost>(`/api/jobs/${id}/decision?who=${who}`, { method: 'POST', body: JSON.stringify({ decision }) }),
   plugins: () => req<{ plugins: Plugin[] }>('/api/claude-plugins'),
   togglePlugin: (id: string, enabled: boolean) =>

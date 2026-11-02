@@ -5,7 +5,7 @@
   "cron": "0 6 * * 0",
   "enabled": true,
   "created": "2026-05-17T00:00:00Z",
-  "last_run": null,
+  "last_run": "2026-11-02T14:01:56.083238+00:00",
   "next_run": null,
   "description": "Weekly memory consolidation every Sunday at 6 AM"
 }

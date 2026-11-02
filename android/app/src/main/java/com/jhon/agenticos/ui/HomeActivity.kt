@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.provider.Settings
 import android.view.Gravity
@@ -44,6 +45,7 @@ import com.jhon.agenticos.core.Digest
 import com.jhon.agenticos.core.Link
 import com.jhon.agenticos.core.Mode
 import com.jhon.agenticos.core.Modes
+import com.jhon.agenticos.core.Quiet
 import com.jhon.agenticos.core.Refused
 import com.jhon.agenticos.core.atomicWrite
 import com.jhon.agenticos.core.osHttp
@@ -77,14 +79,19 @@ class HomeActivity : Activity(), PanelStack.Host {
     private lateinit var modeChip: ModeChip
     private lateinit var panels: PanelStack
     private lateinit var widgets: WidgetsPage
-    private lateinit var orbit: OrbitView
-    private lateinit var orb: Spring    // the orbit: 0 shut, 1 open, follows the finger
+    private lateinit var orbit: OrbitView        // always here: it is also search, whatever the layout
+    private lateinit var layout: AppLayout       // how all apps show (Settings, App layout): the orbit itself, or another
+    private var layoutId = Layouts.ORBIT
+    private lateinit var orb: Spring    // all apps: 0 shut, 1 open, follows the finger
+    private lateinit var which: Spring  // what that spring opens: 0 the layout, 1 the orbit's search (a layout's search field swaps over)
     private lateinit var page: Spring   // 0 home, 1 the widgets page
     private lateinit var enter: Spring  // 0 = just back from an app, 1 = settled (the home screen "lands")
     private var still = false           // phone set to remove animations
     private var appearance = 0          // Appearance.version this screen was built with
     private var away = true             // so the very first show lands too
     private var edgeL = 0; private var edgeR = 0  // where Android's Back gesture lives: page swipes start inside these
+    private var waveK = 1f                        // the orb's scale depth() last set (the corner shrink)
+    private var barTop = 0; private var barRight = 0  // the status bar and cutout: the orb's corner stays clear of them
     private val slots = ArrayList<Slot>()
     private var dockGen = 0
     private val main = Handler(Looper.getMainLooper())
@@ -127,6 +134,20 @@ class HomeActivity : Activity(), PanelStack.Host {
         look.bars(window)
         if (phoneWall) window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
         registerBack()
+        AssistActivity.showing = assistShowing
+        AssistActivity.homeOrb = assistOrb
+    }
+
+    /** The side-button overlay has its own orb: Home's steps out while it's up, so only one shows. Instant: over Home
+     *  the overlay's orb sits exactly on this one at the swap (it glides from here and back). */
+    private val assistShowing: (Boolean) -> Unit = { up ->
+        wave.animate().cancel()
+        wave.alpha = if (up) 0f else 1f
+    }
+
+    /** Home's orb for the overlay to start from: only while Home is on screen with its orb in plain view. */
+    private val assistOrb: () -> JharvisOrb? = {
+        wave.takeIf { !away && it.isShown && it.width > 0 && home.alpha > 0.99f && stage.alpha > 0.99f }
     }
 
     override fun onStart() {
@@ -141,6 +162,8 @@ class HomeActivity : Activity(), PanelStack.Host {
         super.onResume()
         if (!::look.isInitialized) return
         if (appearance != Appearance.version(this)) { recreate(); return }  // changed in Appearance: rebuild in the new look
+        // the phone wallpaper changed under us: the ink that suits it may have too
+        if (Appearance.theme(this).id != look.theme.id || Appearance.bare(this, look.theme).id != look.bare.id) { recreate(); return }
         // Android only lets a mic service start from a visible app: Home showing is the restart point
         if (ListenService.wanted(this) && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
             ListenService.start(this)
@@ -148,7 +171,9 @@ class HomeActivity : Activity(), PanelStack.Host {
             startActivity(Intent(this, SetupActivity::class.java))
         showCached()
         fillDock()
+        if (Layouts.current(this) != layoutId) useLayout(Layouts.current(this))  // changed in Settings: at once
         orbit.load()
+        if (layout !== orbit) layout.load()
         // back from an app (or a see-through one that only paused Home): the home screen comes forward out of a blur
         if (away || enter.target < 1f) {
             away = false
@@ -167,11 +192,13 @@ class HomeActivity : Activity(), PanelStack.Host {
         away = true
         enter.snap(0f)
         closeOrbit(instant = true)
-        AppMenu.dismiss(); panels.collapse()
+        AppMenu.dismiss(); LayoutPicker.dismiss(); panels.collapse()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        if (AssistActivity.showing === assistShowing) AssistActivity.showing = null
+        if (AssistActivity.homeOrb === assistOrb) AssistActivity.homeOrb = null
         main.removeCallbacksAndMessages(null)
         io.shutdown()       // lets a queued send-queue write finish
         net.shutdownNow()   // a PC read in flight is abandoned
@@ -182,7 +209,7 @@ class HomeActivity : Activity(), PanelStack.Host {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (!::look.isInitialized) return
-        AppMenu.dismiss(); panels.collapse()
+        AppMenu.dismiss(); LayoutPicker.dismiss(); panels.collapse()
         if (HomeMath.alreadyOnHome(hasWindowFocus(), intent.flags)) closeTop() else { closeOrbit(instant = true); page.snap(0f) }
     }
 
@@ -209,7 +236,7 @@ class HomeActivity : Activity(), PanelStack.Host {
             addView(GearIcon(context, look).apply {
                 contentDescription = "Settings"
                 isClickable = true; look.press(this, 0.88f)
-                background = look.glassCard(99)
+                background = look.wallGlass(99)
                 setOnClickListener { startActivity(Intent(context, SetupActivity::class.java)) }  // Settings pushes in from the right (its own transition)
             }, LinearLayout.LayoutParams(look.px(48), look.px(48)))
         }
@@ -221,7 +248,7 @@ class HomeActivity : Activity(), PanelStack.Host {
         // the dock: a glass plate sitting in a glass tray (double bezel, concentric radii 28 and 22)
         val dock = LinearLayout(this).apply {
             gravity = Gravity.CENTER
-            background = look.glassCard(22)
+            background = look.wallGlass(22)
             setPadding(look.px(6), look.px(10), look.px(6), look.px(8))
         }
         dockShell = FrameLayout(this).apply {
@@ -244,41 +271,62 @@ class HomeActivity : Activity(), PanelStack.Host {
 
         widgets = WidgetsPage(this, look)
         stage.addView(widgets, FrameLayout.LayoutParams(-1, -1))
-        orbit = OrbitView(this, look, { icon, pkg -> launchApp(icon, pkg) }, { closeOrbit() }).apply { menuActions = menu }
+        orbit = OrbitView(this, look, { icon, pkg -> launchApp(icon, pkg) }, { closeOrbit() }).apply { menuActions = menu; onSearchLeft = { searchLeft() } }
         root.addView(orbit, FrameLayout.LayoutParams(-1, -1))
+        layoutId = Layouts.current(this)
+        layout = makeLayout(layoutId)
 
         root.setOnApplyWindowInsetsListener { _, insets ->
             val i = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
             back.setPadding(i.left + look.px(16), i.top + look.px(8), i.right + look.px(16), i.bottom + look.px(12))
+            barTop = i.top; barRight = i.right
             val g = insets.getInsets(WindowInsets.Type.systemGestures())
             edgeL = max(look.px(24), g.left); edgeR = max(look.px(24), g.right)
             insets  // not consumed: the orbit (its keyboard), the widgets and the panels read their own
         }
 
         orb = Spring(0f, 0.0005f) { depth() }.apply {
-            onRest = { if (target == 0f) { orbit.reset(); hideKeyboard() } }
+            onRest = { if (target == 0f) { orbit.reset(); if (layout !== orbit) layout.reset(); hideKeyboard() } }
         }
+        which = Spring(0f, 0.001f) { depth() }
         page = Spring(0f, 0.0005f) { depth() }
         enter = Spring(0f, 0.001f) { depth() }
         depth()
         return root
     }
 
-    /** One place decides where everything sits: the orbit pushes the home back (scale, blur, fade) while the wave
-     *  shrinks and glides to the orbit's centre; the widgets page slides in from the left over a dimming home; and
-     *  both pages land out of a blur after an app closes. */
+    /** One place decides where everything sits: all apps push the home back (scale, blur, fade) while the wave
+     *  shrinks and glides to the orbit's centre (the sphere's too: it sits inside the globe), or with another layout to
+     *  the top right corner, out of its way; the widgets page slides in from the left over a dimming home; and both
+     *  pages land out of a blur after an app closes. */
     private fun depth() {
         val o = orb.value.coerceAtLeast(0f); val oc = min(o, 1f)
         val s = 1 - 0.08f * oc
         back.scaleX = s; back.scaleY = s; panels.scaleX = s; panels.scaleY = s
-        back.alpha = 1 - 0.7f * oc; panels.alpha = 1 - 0.9f * oc
-        if (!still) { val r = look.px(28) * oc; back.blur(r); panels.blur(r) }
+        back.alpha = 1 - 0.7f * oc; panels.alpha = 1 - oc
+        // the panels fade right out under the open orbit, so their full-screen blur is dropped once they can't be seen
+        if (!still) { val r = look.px(28) * oc; back.blur(r); panels.blur(if (oc >= 0.99f) 0f else r) }
+        val ow = if (layout === orbit) 1f else which.value.coerceIn(0f, 1f)  // the orbit's share of what's open
+        val mid = if (layoutId == Layouts.SPHERE) 1f else ow  // the orb's pull to the centre: the sphere keeps it there
+        val corner = (1 - mid) * oc  // 1 = the orb waits in the corner (0.3 of its size) while a layout is open
+        val k = 1 - CORNER_SHRINK * corner
         wave.compact = oc
-        wave.translationX = oc * (root.width / 2f - (wave.left + wave.width / 2f))
-        wave.translationY = oc * (root.height / 2f - (wave.top + wave.height / 2f))
+        // only when it changes: at home the orb's own press squish owns its scale. zoom: hairlines keep their width
+        if (k != waveK) { waveK = k; wave.scaleX = k; wave.scaleY = k; wave.zoom = k }
+        val rc = cornerRadius()
+        val gx = root.width / 2f + (1 - mid) * (HomeMath.cornerX(root.width.toFloat(), barRight.toFloat(), rc, look.px(16).toFloat()) - root.width / 2f)
+        val gy = root.height / 2f + (1 - mid) * (HomeMath.cornerY(root.height.toFloat(), barTop.toFloat(), rc, look.px(2).toFloat()) - root.height / 2f)
+        wave.translationX = oc * (gx - (wave.left + wave.width / 2f))
+        wave.translationY = oc * (gy - (wave.top + wave.height / 2f))
         wave.translationZ = if (oc > 0.01f) 1f else 0f  // over the panels on its way to the centre
-        orbit.progress = o
-        orbit.visibility = if (o <= 0.002f && orb.target == 0f) View.INVISIBLE else View.VISIBLE
+        topRow.alpha = 1 - corner  // the chips step out of the corner the orb takes
+        orbit.progress = o * ow
+        orbit.visibility = if (o * ow <= 0.002f && !(orb.target > 0f && (layout === orbit || which.target > 0f))) View.INVISIBLE else View.VISIBLE
+        if (layout !== orbit) {
+            layout.progress = o * (1 - ow)
+            val v = if (o * (1 - ow) <= 0.002f && !(orb.target > 0f && which.target < 1f)) View.INVISIBLE else View.VISIBLE
+            if (layout.view.visibility != v) layout.view.visibility = v
+        }
 
         val p = page.value; val pc = p.coerceIn(0f, 1f); val w = root.width.toFloat()
         widgets.translationX = (p - 1) * w
@@ -298,18 +346,70 @@ class HomeActivity : Activity(), PanelStack.Host {
         orbit.scaleX = stage.scaleX; orbit.scaleY = stage.scaleX
         orbit.alpha = stage.alpha
         if (!still) orbit.blur(look.px(26) * (1 - e).coerceAtLeast(0f))
+        // the other layouts too (no blur here: Honeycomb blurs itself as it opens, and they're shut when Home lands)
+        if (layout !== orbit) { layout.view.scaleX = stage.scaleX; layout.view.scaleY = stage.scaleX; layout.view.alpha = stage.alpha }
     }
 
+    /** The orb's lens radius once it sits in the corner (px). */
+    private fun cornerRadius() = min(wave.width, wave.height) * OrbMath.LENS * 0.45f * (1 - CORNER_SHRINK)
+
+    /** Swipe up, the dock's Apps, "Open apps": the chosen layout. Pull down, or a layout's search field: the orbit on
+     *  search. Asked while a layout is open, the orbit's search takes over in place, on its own spring. */
     private fun openOrbit(search: Boolean = false) {
         stopDockPick()
-        if (orb.target == 0f && orb.value < 0.02f) orbit.opening()
+        if (search) searchFromLayout = layout !== orbit && orb.target > 0f && which.target < 1f  // a layout was open under it
+        val to = if (search || layout === orbit) 1f else 0f
+        if (orb.target == 0f && orb.value < 0.02f) { which.snap(to); (if (to == 1f) orbit else layout).opening() }
+        else if (which.target != to) { (if (to == 1f) orbit else layout).opening(); if (still) which.snap(to) else which.to(to, response = 0.5f, damping = 1f) }
         if (search) orbit.openSearch()
         if (still) orb.snap(1f) else orb.to(1f, response = 0.55f, damping = 1f)
     }
 
-    private fun closeOrbit(instant: Boolean = false) {
-        if (instant || still) { orb.snap(0f); orbit.reset(); hideKeyboard() } else orb.to(0f, response = 0.45f, damping = 1f)
+    private var searchFromLayout = false
+
+    /** The orbit's search ended with the field empty: true when Home took it (see HomeMath.searchBack). */
+    private fun searchLeft(): Boolean {
+        if (orb.target == 0f || (layout !== orbit && which.target < 1f)) return false
+        return when (HomeMath.searchBack(layout === orbit, searchFromLayout)) {
+            HomeMath.BACK_TO_LAYOUT -> { layout.opening(); if (still) which.snap(0f) else which.to(0f, response = 0.5f, damping = 1f); true }
+            HomeMath.BACK_HOME -> { closeOrbit(); true }
+            else -> false
+        }
     }
+
+    private fun closeOrbit(instant: Boolean = false) {
+        if (instant || still) { orb.snap(0f); orbit.reset(); if (layout !== orbit) layout.reset(); hideKeyboard() }
+        else orb.to(0f, response = 0.45f, damping = 1f)
+    }
+
+    /** The chosen layout, added under the orbit (so search shows over it). The orbit itself needs nothing added. */
+    private fun makeLayout(id: String): AppLayout =
+        Layouts.make(id, this, look, orbit, { icon, key -> launchApp(icon, key) }, { closeOrbit() }, { openOrbit(search = true) }).also {
+            it.menuActions = menu
+            (it.view as? SphereView)?.onOrb = { x, y -> orbAt(it.view, x, y).also { on -> if (on) wave.performClick() } }
+            if (it !== orbit) { root.addView(it.view, root.indexOfChild(orbit), FrameLayout.LayoutParams(-1, -1)); root.requestApplyInsets() }
+        }
+
+    /** The sphere draws over the orb at its centre, so it hands a missed tap here: on the orb's lens? */
+    private fun orbAt(v: View, x: Float, y: Float): Boolean {
+        val a = IntArray(2); val b = IntArray(2)
+        v.getLocationInWindow(a); wave.getLocationInWindow(b)
+        return wave.onLens(x + a[0] - b[0], y + a[1] - b[1])
+    }
+
+    /** A new layout, picked here or in Settings: swapped in while all apps are shut, so it shows on the next open. */
+    private fun useLayout(id: String) {
+        if (id == layoutId) return
+        closeOrbit(instant = true)
+        if (layout !== orbit) root.removeView(layout.view)
+        layoutId = id
+        layout = makeLayout(id)
+        if (layout !== orbit) layout.load()
+        depth()
+    }
+
+    /** Long press on empty frost (or TalkBack's "Change app layout"): the five layouts on a glass sheet. */
+    private fun pickLayout() = LayoutPicker.show(this, look, layoutId) { id -> Layouts.set(this, id); useLayout(id) }
 
     private fun showPage(to: Float) { if (still) page.snap(to) else page.to(to, response = 0.5f, damping = 1f) }
 
@@ -367,11 +467,13 @@ class HomeActivity : Activity(), PanelStack.Host {
         private fun exactly(px: Int) = View.MeasureSpec.makeMeasureSpec(px, View.MeasureSpec.EXACTLY)
     }
 
-    /** Swipe up anywhere a list doesn't need the finger: the orbit opens glued to it (1:1 from where it was grabbed),
-     *  rubber-bands past open, and on release goes where the flick was heading. Pull down from the top 12%: the
+    /** Swipe up anywhere a list doesn't need the finger: all apps open glued to it (1:1 from where it was grabbed),
+     *  rubber-band past open, and on release go where the flick was heading. Pull down from the top 12%: the
      *  notification shade; from the rest of the upper half: the orbit opens on search. Double tap on empty frost:
-     *  lock. Swipe right (away from the Back edge): the widgets page, same physics; left goes back. Any of them can be
-     *  caught mid-flight. TalkBack swallows swipes, so each is also an accessibility action here. */
+     *  lock; press and hold there: pick the app layout. Swipe right (away from the Back edge): the widgets page, same
+     *  physics; left goes back. Any of them can be caught mid-flight. While a layout is open the orb waits in the top
+     *  corner, still a button (the sphere keeps it at its centre and hands taps on it back). TalkBack swallows
+     *  swipes, so each is also an accessibility action here. */
     inner class HomeRoot(c: Context) : FrameLayout(c) {
         private val slop = ViewConfiguration.get(c).scaledTouchSlop
         private val tapSlop = ViewConfiguration.get(c).scaledDoubleTapSlop
@@ -382,6 +484,15 @@ class HomeActivity : Activity(), PanelStack.Host {
         private val hit = Rect()
         private val at = IntArray(2); private val waveAt = IntArray(2)
         private var lastTap = 0L; private var lastTapX = 0f; private var lastTapY = 0f
+        private var orbTap = false  // this touch began on the orb in the corner: a tap on it is the orb's own
+        // held still on empty frost, nothing open: the app layout sheet (a double tap stays lock: its taps are short)
+        private val hold = Runnable {
+            if (mode == NONE && openSpring() == null && !under { (it.isClickable || it.isLongClickable) && (it !== wave || onOrbLens()) }) {
+                lastTap = 0L
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                pickLayout()
+            }
+        }
 
         override fun onInterceptTouchEvent(e: MotionEvent) = track(e, true)
 
@@ -399,7 +510,8 @@ class HomeActivity : Activity(), PanelStack.Host {
 
         override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
             super.onInitializeAccessibilityNodeInfo(info)
-            for ((id, label) in listOf(A_APPS to "Open apps", A_SEARCH to "Search apps", A_WIDGETS to "Show widgets", A_HOME to "Back to home"))
+            for ((id, label) in listOf(A_APPS to "Open apps", A_SEARCH to "Search apps", A_WIDGETS to "Show widgets", A_HOME to "Back to home",
+                    A_LAYOUT to "Change app layout"))
                 info.addAction(AccessibilityNodeInfo.AccessibilityAction(id, label))
         }
 
@@ -409,6 +521,7 @@ class HomeActivity : Activity(), PanelStack.Host {
                 A_SEARCH -> { showPage(0f); openOrbit(search = true) }
                 A_WIDGETS -> { closeOrbit(); showPage(1f) }
                 A_HOME -> { closeOrbit(); showPage(0f) }
+                A_LAYOUT -> { closeOrbit(instant = true); showPage(0f); pickLayout() }
                 else -> return super.performAccessibilityAction(action, args)
             }
             return true
@@ -422,19 +535,27 @@ class HomeActivity : Activity(), PanelStack.Host {
         private fun track(e: MotionEvent, intercepting: Boolean): Boolean {
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = e.x; downY = e.y; mode = NONE
+                    downX = e.x; downY = e.y; mode = NONE; orbTap = false
                     vt?.recycle(); vt = VelocityTracker.obtain().apply { addMovement(e) }
+                    removeCallbacks(hold)
                     // grabbed mid-flight: catch it where it is
                     if (moving(orb)) { grab(orb, ORBIT); return true }
                     if (moving(page)) { grab(page, PAGE); return true }
+                    // the orb in the corner sits under the layout: Home takes the touch for it
+                    if (onCornerOrb(e.x, e.y)) { orbTap = true; if (!intercepting) wave.tick(); return true }  // ticks once: DOWN comes here twice
+                    if (openSpring() == null) postDelayed(hold, ViewConfiguration.getLongPressTimeout().toLong())
                 }
                 MotionEvent.ACTION_MOVE -> {
                     vt?.addMovement(e)
                     val dx = e.x - downX; val dy = e.y - downY
+                    if (abs(dx) > slop || abs(dy) > slop) { removeCallbacks(hold); orbTap = false }
                     if (mode == NONE && (abs(dx) > slop || abs(dy) > slop)) {
                         mode = decide(dx, dy, intercepting)
                         when (mode) {
-                            ORBIT -> { if (orb.value < 0.02f && orb.target == 0f) orbit.opening(); grab(orb, ORBIT) }
+                            ORBIT -> {
+                                if (orb.value < 0.02f && orb.target == 0f) { which.snap(if (layout === orbit) 1f else 0f); layout.opening() }
+                                grab(orb, ORBIT)
+                            }
                             PAGE -> grab(page, PAGE)
                             SEARCH -> { tick(); openOrbit(search = true) }
                             SHADE -> global("shade")
@@ -461,6 +582,8 @@ class HomeActivity : Activity(), PanelStack.Host {
                     }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    removeCallbacks(hold)
+                    if (orbTap) { orbTap = false; if (e.actionMasked == MotionEvent.ACTION_UP && mode == NONE) wave.performClick() }
                     // seen here too while a child (the panels' scroll) holds the touch: a tap with nothing clickable
                     // under it is a tap on empty frost
                     val tap = e.actionMasked == MotionEvent.ACTION_UP && mode == NONE && abs(e.x - downX) < slop && abs(e.y - downY) < slop &&
@@ -485,15 +608,20 @@ class HomeActivity : Activity(), PanelStack.Host {
                     return was
                 }
             }
-            return mode == ORBIT || mode == PAGE || mode == SEARCH || mode == SHADE
+            return mode == ORBIT || mode == PAGE || mode == SEARCH || mode == SHADE || orbTap
         }
 
         /** Which gesture this is, once the finger has moved past slop. LOCKED = not ours, leave it to the child. */
         private fun decide(dx: Float, dy: Float, intercepting: Boolean): Int {
             val vertical = abs(dy) > abs(dx) * 1.3f; val horizontal = abs(dx) > abs(dy) * 1.3f
             if (!vertical && !horizontal) return NONE  // still diagonal: wait for a clearer direction
-            // open orbit: its rings own the finger; a drag down where it didn't take the touch closes it
-            if (orb.target > 0f) return if (!intercepting && vertical && dy > 0) ORBIT else LOCKED
+            // all apps open: a drag the layout scrolls or pans with is its own; a drag down anywhere else closes it.
+            // The orbit also keeps every drag that began on one of its buttons, as before.
+            if (orb.target > 0f) {
+                val open: AppLayout = if (layout === orbit || which.target > 0f) orbit else layout
+                val owns = open.ownsTouch(downX, downY) || (open === orbit && intercepting)
+                return if (vertical && dy > 0 && !owns) ORBIT else LOCKED
+            }
             if (page.target > 0f) return if (horizontal && dx < 0 && downX < width - edgeR && !under { it.canScrollHorizontally(1) }) PAGE else LOCKED
             if (vertical && dy < 0 && !under { it.canScrollVertically(1) }) return ORBIT
             if (vertical && dy > 0 && HomeMath.inShadeZone(downY, height.toFloat())) return SHADE
@@ -511,13 +639,21 @@ class HomeActivity : Activity(), PanelStack.Host {
             performHapticFeedback(if (Build.VERSION.SDK_INT >= 34) HapticFeedbackConstants.GESTURE_THRESHOLD_ACTIVATE else HapticFeedbackConstants.CLOCK_TICK)
         }
 
-        /** Does anything under where the finger landed pass the test (a list that can still scroll that way)? */
+        /** The orb waiting in the corner while a layout is open: a thumb-sized circle around its lens. */
+        private fun onCornerOrb(x: Float, y: Float): Boolean {
+            if (layout === orbit || layoutId == Layouts.SPHERE || orb.target < 1f || orb.value < 0.9f || which.target > 0f) return false
+            val r = max(cornerRadius() * 1.3f, look.px(24).toFloat())
+            val dx = x - (wave.left + wave.width / 2f + wave.translationX); val dy = y - (wave.top + wave.height / 2f + wave.translationY)
+            return dx * dx + dy * dy <= r * r
+        }
+
         /** The orb's view spans the width, but only its lens is a button (JharvisOrb.onLens). */
         private fun onOrbLens(): Boolean {
             getLocationInWindow(at); wave.getLocationInWindow(waveAt)
             return wave.onLens(downX + at[0] - waveAt[0], downY + at[1] - waveAt[1])
         }
 
+        /** Does anything under where the finger landed pass the test (a list that can still scroll that way)? */
         private fun under(test: (View) -> Boolean): Boolean {
             getLocationInWindow(at)
             return hits(this, (downX + at[0]).toInt(), (downY + at[1]).toInt(), test)
@@ -616,7 +752,7 @@ class HomeActivity : Activity(), PanelStack.Host {
     /** Back to no mode with chats held meanwhile: the panels show what came in, and closing that card marks it seen.
      *  :core stays the only writer of digest.json (chats muted while the card shows aren't lost). */
     private fun checkDigest() = on(io) {
-        if (Modes.current() != Mode.OFF) return@on
+        if (Modes.current() != Mode.OFF || Quiet.on()) return@on  // Sleep keeps the mode at Off: no card until it ends too
         val items = Digest.unseen()
         if (items.length() == 0) return@on
         val text = items.toString()
@@ -690,7 +826,7 @@ class HomeActivity : Activity(), PanelStack.Host {
     private fun chip(word: String, tint: Int, check: Check?) = look.text(word, 13f, tint, true).apply {
         gravity = Gravity.CENTER
         setPadding(look.px(16), 0, look.px(16), 0)
-        background = look.glassCard(99)
+        background = look.wallGlass(99)
         layoutParams = LinearLayout.LayoutParams(-2, look.px(48)).apply { rightMargin = look.px(8) }  // 48 dp touch target
         if (check != null) { isClickable = true; look.press(this); setOnClickListener { check.fix(this@HomeActivity) } }
         contentDescription = word
@@ -699,9 +835,9 @@ class HomeActivity : Activity(), PanelStack.Host {
     // ── Dock ────────────────────────────────────────────────────────────────────────────────────────
 
     private class Slot(val icon: ImageView, val label: TextView, val box: View, val badge: TextView) {
-        var pkg = ""; var launch: Intent? = null; var name: String? = null
+        var pkg = ""; var key = ""; var launch: Intent? = null; var name: String? = null  // key: the app key menus, locks and counts use
     }
-    private class DockApp(val pkg: String, val launch: Intent?, val label: String?, val icon: Drawable?)
+    private class DockApp(val pkg: String, val key: String, val launch: Intent?, val label: String?, val icon: Drawable?)
 
     private fun slotBox(icon: View, label: TextView, badge: TextView? = null) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER
@@ -725,10 +861,10 @@ class HomeActivity : Activity(), PanelStack.Host {
             box.setOnClickListener {
                 dockPick?.let { pkg -> placeInDock(slot, pkg); return@setOnClickListener }
                 val l = s.launch
-                if (l != null) LockedApps.launch(this, s.pkg, s.name) { LaunchCounts.bump(this, s.pkg); go(icon, l) } else pickFor(slot)
+                if (l != null) LockedApps.launch(this, s.key, s.name) { LaunchCounts.bump(this, s.key); go(icon, l) } else pickFor(slot)
             }
             // hold an app: its menu (shortcuts, hide, info, delete); hold an empty spot: pick an app for it
-            box.setOnLongClickListener { if (s.launch != null) AppMenu.show(icon, s.pkg, look, menu) else pickFor(slot); true }
+            box.setOnLongClickListener { if (s.launch != null) AppMenu.show(icon, s.key, look, menu) else pickFor(slot); true }
             slots += s
             row.addView(box, LinearLayout.LayoutParams(0, -2, 1f))
         }
@@ -774,17 +910,19 @@ class HomeActivity : Activity(), PanelStack.Host {
             val hidden = HiddenApps.all(this@HomeActivity)
             val got = (0 until 4).map { slot ->
                 val pkg = prefs.getString(Modes.dockKey(slot), null) ?: prefs.getString("dock$slot", null) ?: defaults[slot]
-                // a hidden app stays off the dock: its slot shows as empty ("Pick")
-                val launch = pkg.takeIf { it.isNotEmpty() && it !in hidden }?.let { pm.getLaunchIntentForPackage(it) }
+                // a hidden app stays off the dock: its slot shows as empty ("Pick"). Hidden holds app keys, and an app
+                // with two launcher icons is keyed by its component, so the dock's package is matched through its key.
+                val key = if (pkg.isEmpty()) pkg else AppKey.forPackage(this@HomeActivity, pkg)
+                val launch = pkg.takeIf { it.isNotEmpty() && key !in hidden && it !in hidden }?.let { pm.getLaunchIntentForPackage(it) }
                 val label = launch?.let { try { pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString() } catch (_: Exception) { null } }
                 val icon = launch?.let { try { pm.getApplicationIcon(pkg) } catch (_: Exception) { null } }
-                DockApp(pkg, launch, label, icon)
+                DockApp(pkg, key, launch, label, icon)
             }
             main.post {
                 if (gen != dockGen || isDestroyed) return@post
                 got.forEachIndexed { k, a ->
                     val s = slots[k]
-                    s.pkg = a.pkg; s.launch = a.launch; s.name = a.label
+                    s.pkg = a.pkg; s.key = a.key; s.launch = a.launch; s.name = a.label
                     s.label.text = a.label ?: "Pick"
                     if (a.icon != null) { s.icon.background = null; s.icon.setImageDrawable(a.icon) }
                     else { s.icon.setImageDrawable(null); s.icon.background = look.round(Color.TRANSPARENT, 16, look.ink3) }
@@ -797,7 +935,7 @@ class HomeActivity : Activity(), PanelStack.Host {
     /** What the app menu's actions mean on Home. */
     private val menu = object : AppMenu.Actions {
         override fun addToDock(pkg: String) = startDockPick(pkg)
-        override fun changed() { orbit.load(); fillDock(); modeChip.refresh() }
+        override fun changed() { MenuChange.at = SystemClock.uptimeMillis(); orbit.load(); if (layout !== orbit) layout.load(); fillDock(); modeChip.refresh() }
     }
 
     /** "Add to dock": the orbit steps aside, the dock's spots light up, the next tap on one places the app there.
@@ -898,18 +1036,39 @@ class HomeActivity : Activity(), PanelStack.Host {
         const val GLOBAL = "com.jhon.agenticos.GLOBAL"
         // accessibility custom actions: ids outside the framework (0x01...) and app (0x7f...) resource ranges
         const val A_APPS = 0x7E0A0001; const val A_SEARCH = 0x7E0A0002; const val A_WIDGETS = 0x7E0A0003; const val A_HOME = 0x7E0A0004
+        const val A_LAYOUT = 0x7E0A0005
+        const val CORNER_SHRINK = 1 - 0.3f / 0.45f  // with compact's 0.45, the orb in the corner is 0.3 of its size
         var gestureHinted = false  // once per process: shown again after a restart if the island is still off
     }
 }
 
 /** Home's pure decisions, kept apart so they can be unit tested. */
 object HomeMath {
+    const val BACK_TO_RINGS = 0; const val BACK_TO_LAYOUT = 1; const val BACK_HOME = 2
+
+    /** Where search goes when he leaves it with the field empty (keyboard closed, Back). The orbit as his layout: its
+     *  rings, as always. Another layout: back to it if he came from its search field, else to Home (Jhon, 2 Nov:
+     *  pull down, Back, and Orbit showed although his layout was Honeycomb). */
+    fun searchBack(layoutIsOrbit: Boolean, fromLayout: Boolean) = when {
+        layoutIsOrbit -> BACK_TO_RINGS
+        fromLayout -> BACK_TO_LAYOUT
+        else -> BACK_HOME
+    }
+
     /** Where a released drag goes: open (1) or shut (0), judged by where the flick was heading, not where it let go.
      *  pos and velocity in the same units (0..1 and 0..1 per second). */
     fun settle(pos: Float, velocity: Float) = if (pos + project(velocity) > 0.5f) 1f else 0f
 
     /** Launcher3's test: Home pressed while Home was already in front with focus (not brought back from an app). */
     fun alreadyOnHome(focused: Boolean, flags: Int) = focused && (flags and Intent.FLAG_ACTIVITY_BROUGHT_TO_FRONT) == 0
+
+    /** Where the orb waits while another layout is open: the top right corner, gap in from the edge (and the
+     *  cutout or bars on that side), its radius r there. */
+    fun cornerX(w: Float, right: Float, r: Float, gap: Float) = w - right - gap - r
+
+    /** Its centre height: in the middle of the band from the status bar to the top 10% the layouts keep clear, and
+     *  never under the status bar. */
+    fun cornerY(h: Float, top: Float, r: Float, gap: Float) = max(top + gap + r, (top + 0.10f * h) / 2f)
 
     /** A pull down that starts in the top 12% of the screen opens the shade; lower down it stays search. */
     fun inShadeZone(downY: Float, height: Float) = downY < height * 0.12f

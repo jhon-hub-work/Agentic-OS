@@ -61,6 +61,19 @@ internal object AppKey {
     fun pkg(key: String) = key.substringBefore('/')
     fun serial(key: String): Long? = if ('/' in key) key.substringAfterLast('#', "").toLongOrNull() else null
     fun component(key: String): ComponentName? = if ('/' in key) ComponentName.unflattenFromString(key.substringBefore('#')) else null
+
+    /** The main profile's key for a plain package (the dock stores packages): the package itself when it has one
+     *  launcher icon, else its launch activity's "component#serial", as the app list keys it. Binder calls: never on
+     *  the main thread. */
+    fun forPackage(c: Context, pkg: String): String = try {
+        val me = Process.myUserHandle()
+        val list = c.getSystemService(LauncherApps::class.java)?.getActivityList(pkg, me).orEmpty()
+        if (list.size <= 1) pkg else {
+            val cn = c.packageManager.getLaunchIntentForPackage(pkg)?.component
+            val a = list.firstOrNull { it.componentName == cn } ?: list[0]
+            of(pkg, a.componentName.flattenToString(), true, false, c.getSystemService(UserManager::class.java)?.getSerialNumberForUser(me) ?: -1L)
+        }
+    } catch (_: Exception) { pkg }
 }
 
 class AppEntry(val key: String, val pkg: String, val label: String, val info: LauncherActivityInfo, val user: UserHandle,
@@ -325,7 +338,7 @@ object AppBadges {
         gravity = android.view.Gravity.CENTER
         minWidth = look.px(20); minHeight = look.px(20)
         setPadding(look.px(6), 0, look.px(6), 0)
-        background = look.round(look.white(245), 99, look.accent)
+        background = look.round(look.withAlpha(look.ground, 245), 99, look.accent)  // ground, not white: white is faint on dark themes
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO  // the icon says it ("Gmail, 3 notifications")
     }
 }

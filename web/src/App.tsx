@@ -36,6 +36,7 @@ const NAV: { id: string; label: string; icon: Icon }[] = [
   { id: 'activity', label: 'Activity', icon: ListBullets },
 ]
 const PHONE_TABS = 4  // the rest sit under "More"
+const TAB_ORDER = [1, 2, 0, 3]  // Jharvis sits in the middle of the tab bar as the main button
 
 const current = () => NAV.find(n => `#/${n.id}` === location.hash)?.id ?? 'home'
 
@@ -138,9 +139,18 @@ export default function App() {
           ))}
         </motion.div>
       )}
-      <nav aria-label="Main" className="glass-bar fixed inset-x-3 bottom-3 z-20 flex justify-around rounded-[1.5rem] px-1 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] md:hidden">
-        {NAV.slice(0, PHONE_TABS).map(n => {
+      <nav aria-label="Main" className="glass-bar fixed inset-x-3 bottom-3 z-20 flex items-end justify-around rounded-[1.5rem] px-1 py-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))] md:hidden">
+        {TAB_ORDER.map(i => NAV[i]).map(n => {
           const active = page === n.id
+          if (n.id === 'home') return (
+            <a key={n.id} href={`#/${n.id}`} aria-current={active ? 'page' : undefined}
+              className={`-mt-8 flex min-w-16 flex-col items-center gap-0.5 text-[11px] ${active ? 'text-ink' : 'text-ink-3'}`}>
+              <span className="chrome flex h-16 w-16 items-center justify-center rounded-full shadow-[0_10px_24px_-8px_rgba(14,23,38,0.55)] ring-4 ring-ice/70 transition-transform duration-150 active:scale-95">
+                <n.icon size={30} weight="regular" aria-hidden="true" />
+              </span>
+              <span className="font-medium">{n.label}</span>
+            </a>
+          )
           return (
             <a key={n.id} href={`#/${n.id}`} aria-current={active ? 'page' : undefined}
               className={`relative flex min-h-12 min-w-12 flex-col items-center justify-center gap-0.5 rounded-2xl px-2 text-[11px] ${active ? 'text-ink' : 'text-ink-3'}`}>

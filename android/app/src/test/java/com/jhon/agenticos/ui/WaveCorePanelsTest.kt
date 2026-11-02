@@ -61,6 +61,19 @@ class WaveCorePanelsTest {
         assertEquals("", PanelLogic.argsText(JSONArray()))
     }
 
+    @Test fun plainWordsWithDetailsFolded_elseTheOldText() {
+        assertNull(PanelLogic.plain(JSONObject().put("tool", "run_shell").put("args", JSONObject().put("command", "ls"))))  // an older card
+        assertNull(PanelLogic.plain(JSONObject().put("what", JSONObject.NULL)))
+        val p = PanelLogic.plain(JSONObject().put("what", " Read Dr L's new WhatsApp message ").put("why", "You asked if she wrote.")
+            .put("if_no", "Nothing is read.").put("args", JSONObject().put("command", "adb shell")))!!
+        assertEquals("Read Dr L's new WhatsApp message", p.what)
+        assertEquals("You asked if she wrote.", p.why); assertEquals("Nothing is read.", p.ifNo)
+        assertEquals("adb shell", p.details)  // no details field: the request itself goes in the fold
+        assertEquals("exact", PanelLogic.plain(JSONObject().put("what", "x").put("details", "exact").put("args", JSONObject().put("command", "y")))!!.details)
+        val a = JSONObject().put("id", "1").put("tool", "t").put("what", "x")
+        assertTrue(PanelLogic.askSig(a, null) != PanelLogic.askSig(JSONObject(a.toString()).put("why", "new"), null))  // reworded: redrawn
+    }
+
     @Test fun answerStatusPrefersTheQueue() {
         assertNull(PanelLogic.status("7", null, emptySet()))
         assertEquals("Approved. Sending.", PanelLogic.status("7", true, emptySet()))
@@ -75,5 +88,12 @@ class WaveCorePanelsTest {
         assertTrue(PanelLogic.askSig(a, null) != PanelLogic.askSig(a, "Approved. Sending."))
         val p = JSONObject().put("title", "Jobs").put("lines", JSONArray().put("one"))
         assertTrue(PanelLogic.panelSig(p) != PanelLogic.panelSig(JSONObject(p.toString()).put("lines", JSONArray().put("two"))))
+    }
+
+    @Test fun ifNoReadsLikeTheDashboard() {
+        assertEquals("If you say no: nothing is read.", PanelLogic.ifNoLine("Nothing is read."))
+        assertEquals("If you say no: PC stays on.", PanelLogic.ifNoLine("PC stays on."))  // an acronym keeps its capitals
+        assertEquals("If you say no: I won't send it.", PanelLogic.ifNoLine("I won't send it."))
+        assertEquals("", PanelLogic.ifNoLine(""))
     }
 }

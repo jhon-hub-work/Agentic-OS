@@ -46,4 +46,11 @@ class LiveJobsTest {
         assertEquals(60_000L, LiveJobs.interval(anyLive = false, pcAnswered = true))
         assertEquals(120_000L, LiveJobs.interval(anyLive = true, pcAnswered = false))
     }
+
+    @Test fun anEndDuringQuietIsKeptForTheSummary() {
+        val done = LiveJobs.Item("dye:a1", "Mole check", "Edit finished", 0, 0, LiveJobs.State.DONE, "")
+        assertEquals("Mole check: Edit finished", LiveJobs.held(done, quiet = true))
+        assertNull(LiveJobs.held(done, quiet = false))  // awake: the usual notification
+        assertNull(LiveJobs.held(done.copy(state = LiveJobs.State.GONE), quiet = true))  // nothing to report
+    }
 }

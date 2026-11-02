@@ -40,7 +40,13 @@ DRAFT_RULES = f"""Rules for every application (the owner's standing rules):
 - Where a detail is unknown, leave a blank like [ADD: hourly rate?] instead of guessing.
 - If salary is asked: "{owner.OWNER.get('salary_line') or '[ADD: expected salary]'}".
 - Australian/neutral English, warm and short: 120-180 words, no clichés, no "I am writing to apply".
+- Sound like {owner.NAME} typing, not a chatbot (blader/humanizer, Jhon 31 Oct): no "not X but Y" contrasts, no
+  one-line closer that repeats the point, no warm-up opener ("I hope this finds you well", "Just a quick..."), no
+  lists of three for rhythm, no em or en dashes, none of: delve, crucial, key, showcase, leverage, passionate,
+  thrilled, excited to, seamless, robust, valuable, testament. Contractions, mixed sentence lengths, plain specifics.
 """
+# His own voice guide sits beside the CV (career-ops); a sample of how he writes beats any rule list.
+VOICE = CV.with_name("voice-dna.md")
 
 
 def now() -> str:
@@ -166,6 +172,7 @@ def draft(job: dict, run_agent, cv: str, answers: str) -> str:
            if (job.get("source") or "").startswith("reddit") else "") + "\n"
         f"# Job\n{job['title']} at {job['company']} ({job['url']})\nPay: {job.get('pay') or 'not stated'}\n"
         f"{(job.get('jd') or '')[:3000]}\n\n# CV\n{cv}\n\n# Standing answers\n{answers}"
+        + (f"\n\n# How he writes (match this voice)\n{VOICE.read_text(encoding='utf-8')[:6000]}" if VOICE.exists() else "")
     )
     return run_agent("claude", prompt).strip()
 
@@ -186,7 +193,8 @@ def leaks(text: str) -> str:
 OWNER_ONLY = re.compile(
     r"\b(voice (?:recording|memo|note|sample|clip)|audio (?:recording|sample|clip)|record(?:ing)? (?:yourself|your voice"
     r"|a (?:short )?(?:video|loom))|video (?:intro\w*|of yourself|recording of you)|loom|vocaroo|selfie|test task"
-    r"|trial task|paid trial|skills? test|sample (?:edit|task)|interview call|zoom call)\b", re.I)
+    r"|trial task|paid trial|skills? test|sample (?:edit|task)|interview call|zoom call"
+    r"|application (?:task|exercise)|email your (?:completed )?(?:submission|application))\b", re.I)  # sent off the board, 31 Oct
 
 
 def needs_owner(job: dict) -> str:
@@ -369,18 +377,33 @@ def add_link(link: str, run_agent) -> dict:
 FOLLOW_AFTER_H = 48
 
 
-def followups_due() -> list:
-    """Applied jobs with no reply FOLLOW_AFTER_H hours on and no follow-up yet (one follow-up per job)."""
+def really_sent(j: dict) -> bool:
+    """The application went out: the OS sent it, or he marked it applied himself. Jhon 31 Oct: a failed send
+    ("not sent: it is empty") or a job whose real step (an emailed test edit) was never done got follow-ups."""
+    return (j.get("apply_result") == "submitted" or j.get("applied_by") == "owner") and not needs_owner(j)
+
+
+def auto_followup(url: str) -> bool:
+    """Sites where the OS sends the follow-up itself: a Reddit DM, or the OnlineJobs thread (olj_followup.py)."""
+    return "reddit.com/" in url or "onlinejobs.ph" in url
+
+
+def followups_due(path: Path = BOARD) -> list:
+    """Applied jobs with no reply FOLLOW_AFTER_H hours on and no follow-up yet (one follow-up per job). One that
+    couldn't go out (Brave signed out) is tried again where the OS can send it."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=FOLLOW_AFTER_H)).isoformat()
-    return [j for j in load(BOARD, {"jobs": []})["jobs"] if j["status"] == "applied" and (j.get("applied_at") or "z") < cutoff
-            and not j.get("followed_up_at") and not j.get("follow_up")]
+    return [j for j in load(path, {"jobs": []})["jobs"] if j["status"] == "applied" and (j.get("applied_at") or "z") < cutoff
+            and not j.get("followed_up_at") and really_sent(j)
+            and (not j.get("follow_up") or (j["follow_up"] == "due" and auto_followup(j["url"])))]
 
 
 def draft_followup(job: dict, run_agent) -> str:
+    voice = VOICE.read_text(encoding="utf-8")[:6000] if VOICE.exists() else ""
     prompt = (f"Write {owner.NAME}'s short follow-up to an application sent {FOLLOW_AFTER_H}+ hours ago with no reply. "
               "Reply with only the message text.\n\n" + DRAFT_RULES +
               "- 30-60 words (overrides the length rule above): friendly nudge, still keen, one line on fit, no guilt.\n\n"
-              f"# Job\n{job['title']} at {job['company']}\n\n# The first message\n{job.get('draft') or '(not saved)'}")
+              f"# Job\n{job['title']} at {job['company']}\n\n# The first message\n{job.get('draft') or '(not saved)'}"
+              + (f"\n\n# How he writes (match this voice)\n{voice}" if voice else ""))
     return run_agent("claude", prompt).strip()
 
 
@@ -410,13 +433,17 @@ class StateError(Exception):
 
 def decide(jid: str, decision: str, path: Path = BOARD) -> dict:
     """approve / skip / applied. Approving starts the apply step (server.apply_approved)."""
-    if decision in ("replied", "followed_up"):  # tracking marks from the owner; status stays readable in exports
+    marks = {"replied": lambda: {"status": "replied", "replied_at": now()},
+             "followed_up": lambda: {"followed_up_at": now(), "follow_up": "done"},
+             # Jhon 31 Oct: a closed posting or one not worth a nudge leaves the Follow up list
+             "closed": lambda: {"status": "closed", "closed_at": now()},
+             "skip_followup": lambda: {"follow_up": "skipped"}}
+    if decision in marks:  # tracking marks from the owner; status stays readable in exports
         with BOARD_LOCK:
             board = load(path, {"jobs": [], "runs": []})
             for j in board["jobs"]:
                 if j["id"] == jid:
-                    j.update({"status": "replied", "replied_at": now()} if decision == "replied"
-                             else {"followed_up_at": now(), "follow_up": "done"})
+                    j.update(marks[decision]())
                     save(path, board)
                     return j
         raise KeyError(jid)
@@ -430,6 +457,8 @@ def decide(jid: str, decision: str, path: Path = BOARD) -> dict:
                     raise StateError(f"can't approve a job that is {j['status']}")
                 j["status"] = {"approve": "approved", "skip": "skipped", "applied": "applied"}[decision]
                 j["decided"] = now()
+                if decision == "applied":  # he applied himself: follow-ups count it as sent
+                    j.update(applied_by="owner", applied_at=j.get("applied_at") or now())
                 save(path, board)
                 return j
     raise KeyError(jid)
@@ -462,6 +491,24 @@ def _selftest():
     assert pay_ok({**sm, "pay": "$8/hr", "jd": ""}) and not pay_ok({**sm, "pay": "$6/hr", "jd": ""})
     assert not pay_ok({**sm, "jd": head("$1000 / month")}) and pay_ok({**sm, "jd": head("$1500 / month")})
     assert same_job({"company": "Pavago", "title": "Video Editor"}) == same_job({"company": "pavago", "title": "Video  Editor!"})
+    assert really_sent({"apply_result": "submitted"}) and really_sent({"apply_result": "x", "applied_by": "owner"})
+    assert not really_sent({"apply_result": "not sent: it is empty"})
+    assert not really_sent({"apply_result": "submitted", "jd": "This is a three-edit, unpaid application exercise."})
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "b.json"
+        old = (datetime.now(timezone.utc) - timedelta(hours=FOLLOW_AFTER_H + 1)).isoformat()
+        save(p, {"jobs": [{"id": "a", "status": "applied", "applied_at": old, "apply_result": "submitted"},
+                          {"id": "b", "status": "applied", "applied_at": old, "apply_result": "not sent: it is empty"}]})
+        assert [j["id"] for j in followups_due(p)] == ["a"]
+        set_fields("a", p, follow_up="due", url="https://www.onlinejobs.ph/jobseekers/job/x")
+        assert [j["id"] for j in followups_due(p)] == ["a"]  # not sent yet: tried again
+        set_fields("a", p, url="https://himalayas.app/x")
+        assert not followups_due(p)  # the owner sends that one; no new draft every run
+        set_fields("a", p, follow_up=None)
+        decide("a", "skip_followup", p)
+        assert not followups_due(p)
+        assert decide("b", "closed", p)["status"] == "closed"
     print("pipeline selftest ok")
 
 

@@ -38,6 +38,7 @@ import com.jhon.agenticos.core.Mode
 import com.jhon.agenticos.core.ModeState
 import com.jhon.agenticos.core.ModeTile
 import com.jhon.agenticos.core.Modes
+import com.jhon.agenticos.core.Quiet
 import com.jhon.agenticos.core.Shift
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.ExecutorService
@@ -47,11 +48,14 @@ import java.util.concurrent.Executors
  *  glass menu out of the chip. mode.json is read and written off the main thread; onChange runs after any switch,
  *  including ones made by the Quick Settings tile or the clock (core hours, the 3 h Driving end). */
 class ModeChip(c: Context, private val look: Look, private val onChange: () -> Unit) : LinearLayout(c) {
-    private data class Snap(val state: ModeState, val mode: Mode, val hours: String?, val car: Car?)
+    // quiet: the PC's Sleep (Quiet) is on, however it got there; the chip then says Sleep over any mode
+    private data class Snap(val state: ModeState, val mode: Mode, val hours: String?, val car: Car?, val quiet: Boolean) {
+        val label get() = if (quiet) Quiet.SLEEP else mode.label
+    }
 
     private val word = look.text("Mode", 14f, look.ink3, bold = true).apply {
         gravity = Gravity.CENTER; setPadding(look.px(14), 0, look.px(14), 0)
-        background = look.glassCard(17)
+        background = look.wallGlass(17)
     }
     private val still = reducedMotion(c)
     private val arrive = Spring(1f) { p -> word.alpha = p; if (!still) { word.scaleX = 0.92f + 0.08f * p; word.scaleY = word.scaleX; word.blur(look.px(8) * (1 - p)) } }
@@ -104,19 +108,20 @@ class ModeChip(c: Context, private val look: Look, private val onChange: () -> U
         val shift = try { Shift.load() } catch (_: Exception) { null }
         val now = System.currentTimeMillis()
         val hours = shift?.let { "${clock.format(it.start)} to ${clock.format(it.end)}" }
-        return Snap(state, Modes.resolve(state, now, if (state.auto) shift else null), hours, Modes.savedCar())
+        return Snap(state, Modes.resolve(state, now, if (state.auto) shift else null), hours, Modes.savedCar(), Quiet.on())
     }
 
     private fun show(s: Snap) {
-        val was = snap?.mode
+        val was = snap?.label
         snap = s
         removeCallbacks(tick)
         if (visible) postDelayed(tick, 30_000)
         menu?.bind(s)
-        if (was == s.mode) return
-        word.text = if (s.mode == Mode.OFF) "Mode" else s.mode.label
-        word.setTextColor(if (s.mode == Mode.OFF) look.ink3 else look.glacier)
-        contentDescription = "Mode, ${s.mode.label}"
+        if (was == s.label) return
+        val off = s.label == Mode.OFF.label
+        word.text = if (off) "Mode" else s.label
+        word.setTextColor(if (off) look.ink3 else look.accentInk)
+        contentDescription = "Mode, ${s.label}"
         if (was == null) return  // first read: nothing changed, it just arrived
         if (still) arrive.snap(1f) else { arrive.snap(0f); arrive.to(1f, response = 0.42f) }
         onChange()
@@ -124,7 +129,9 @@ class ModeChip(c: Context, private val look: Look, private val onChange: () -> U
 
     // a disk that refuses leaves the menu showing what is really on: the read after the write is the truth
     private fun write(w: () -> Unit) = bg { try { w() } catch (_: Exception) {}; val s = load(); post { show(s) } }
-    private fun pick(m: Mode) = write { Modes.set(m) }
+    // picking any other choice leaves Sleep; Sleep itself leaves the mode as it is (Night shift is separate)
+    private fun pick(m: Mode) { val leave = snap?.quiet == true; write { if (leave) Quiet.set(false, "mode"); Modes.set(m) } }
+    private fun sleep() = write { Quiet.set(true, "mode") }
     private fun follow(on: Boolean) = write { Modes.follow(on) }
     private fun silence(on: Boolean) = write { Modes.silence(on) }
     private fun saveCar(c: Car?) = write { Modes.saveCar(c) }
@@ -142,6 +149,7 @@ class ModeChip(c: Context, private val look: Look, private val onChange: () -> U
         private val shell = LinearLayout(c)
         private val core = LinearLayout(c)
         private val rows = HashMap<Mode, Row>()
+        private val sleepRow: Row
         private val followRow: Row
         private val toggle = Toggle(c)
         private val silenceToggle = Toggle(c)
@@ -178,6 +186,11 @@ class ModeChip(c: Context, private val look: Look, private val onChange: () -> U
                 r.setOnClickListener { choose(m) }
                 core.addView(r, LinearLayout.LayoutParams(-1, -2))
             }
+            sleepRow = Row(Quiet.SLEEP, check = true).also { r ->
+                r.sub("Jharvis keeps news for later")
+                r.setOnClickListener { chooseSleep() }
+                core.addView(r, LinearLayout.LayoutParams(-1, -2))
+            }
             core.addView(View(c).apply { setBackgroundColor(look.inkA(20)) },
                 LinearLayout.LayoutParams(-1, look.px(1)).apply { setMargins(look.px(14), look.px(6), look.px(14), look.px(6)) })
             followRow = switchRow("Night shift follows my core hours", toggle) { follow(it) }
@@ -200,8 +213,9 @@ class ModeChip(c: Context, private val look: Look, private val onChange: () -> U
 
         fun bind(s: Snap) {
             val now = System.currentTimeMillis()
+            sleepRow.picked(s.quiet)
             for ((m, r) in rows) {
-                val on = m == s.mode
+                val on = m == s.mode && !s.quiet
                 val until = s.state.until.takeIf { on && s.state.manual == m && it in (now + 1) until Long.MAX_VALUE }
                     ?.let { " until " + clock.format(java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault())) }
                 r.sub(when (m) {
@@ -357,12 +371,24 @@ class ModeChip(c: Context, private val look: Look, private val onChange: () -> U
         }
 
         private fun choose(m: Mode) {
-            if (snap?.mode != m) {
+            if (snap?.mode != m || snap?.quiet == true) {
                 for ((k, r) in rows) r.picked(k == m)
+                sleepRow.picked(false)
                 performHapticFeedback(HapticFeedbackConstants.CONFIRM)
                 pick(m)
             }
             postDelayed({ close() }, 200)  // long enough to see the check land
+        }
+
+        /** He told the phone "I'm going to sleep": the PC holds Jharvis's news and turns on Do Not Disturb. */
+        private fun chooseSleep() {
+            if (snap?.quiet != true) {
+                for (r in rows.values) r.picked(false)
+                sleepRow.picked(true)
+                performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                sleep()
+            }
+            postDelayed({ close() }, 200)
         }
 
         private fun addTile() {

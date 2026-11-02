@@ -85,6 +85,10 @@ def main(path: str) -> dict:
     import hoot
 
     job = json.loads(Path(path).read_text(encoding="utf-8"))
+    if hoot.is_olj(job["url"]) and job.get("mode") == "followup":
+        import olj_followup
+        why = hoot.sendable(f"Application: {job['title']}"[:120], job.get("followup_draft", ""))
+        return {"outcome": "handoff", "reason": f"not sent: {why}"} if why else olj_followup.send(job, job["followup_draft"])
     if hoot.is_olj(job["url"]):
         # OnlineJobs.ph: Hoot's Brave (the owner signed in) fills the reply and presses SEND EMAIL once.
         subject = f"Application: {job['title']}"[:120]

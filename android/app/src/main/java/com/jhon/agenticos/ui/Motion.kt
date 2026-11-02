@@ -170,6 +170,21 @@ internal object BlurMath {
     /** r px in whole steps of `step` px (half a dp): 0 = no blur. One UI's method: a few cached radii, not a new
      *  effect for every fractional pixel. */
     fun steps(r: Float, step: Float): Int = if (step <= 0f || !(r > 0f)) 0 else Math.round(r / step)
+
+    /** Fewer levels as a blur grows: none under 2 steps (a blur under a dp can't be seen, and spring tails sit
+     *  there for many frames), whole steps up to 8, then each level about 20% past the last (10, 12, 14, 17, 20, 24,
+     *  29, 35, 42, 50, 60...), rounded to the nearest. A moving blur re-renders its view only when the level changes,
+     *  so a 28 dp push-back blurs again about 18 times instead of 56; levels 20% apart don't show in motion. */
+    fun coarse(n: Int): Int {
+        if (n < 2) return 0
+        if (n <= 8) return n
+        var lo = 8
+        while (true) {
+            val hi = maxOf(lo + 1, Math.round(lo * 1.2f))
+            if (n < hi) return if (n - lo < hi - n) lo else hi
+            lo = hi
+        }
+    }
 }
 
 /** Shared blur state: one RenderEffect per half-dp radius, the radius each view shows, and battery saver (asked at
@@ -205,7 +220,7 @@ internal object Blur {
 
     fun apply(v: View, r: Float) {
         val s = step(v.context)
-        val n = if (saver(v.context)) 0 else BlurMath.steps(r, s)  // battery saver: the caller's scale and alpha carry it
+        val n = if (saver(v.context)) 0 else BlurMath.coarse(BlurMath.steps(r, s))  // battery saver: the caller's scale and alpha carry it
         val was = shown[v] ?: 0
         if (n == was) return  // unchanged radius: nothing to re-apply
         if (n == 0) shown.remove(v) else shown[v] = n
@@ -267,7 +282,7 @@ class FrostView(c: Context, private val look: Look, home: Boolean = false) : Vie
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val prefs = Appearance.prefs(c)
     private val wall = prefs.getString(Appearance.WALL, Appearance.FROST) ?: Appearance.FROST
-    private val dimA = prefs.getInt(Appearance.DIM, 30).coerceIn(Appearance.MIN_DIM, 90) * 255 / 100
+    private val dimA = Appearance.dimA(c)
     private val quietA = max(dimA, 204)  // about 80% of the ground: ink reads on any photo
     private var veil = look.withAlpha(look.ground, dimA)
 

@@ -400,7 +400,7 @@ class ShareActivity : Activity() {
         addView(img, FrameLayout.LayoutParams(-1, -1))
         val label = when { more > 0 -> "+$more"; it.video -> clock(it.durMs); else -> null }
         label?.let { s -> addView(look.text(s, 13f, Color.WHITE, true).apply {
-            background = look.round(look.shade(120), 8); setPadding(look.px(6), look.px(1), look.px(6), look.px(1))
+            background = look.round(look.shade(170), 8); setPadding(look.px(6), look.px(1), look.px(6), look.px(1))
         }, FrameLayout.LayoutParams(-2, -2, if (more > 0) Gravity.CENTER else Gravity.BOTTOM or Gravity.END).apply { setMargins(look.px(4), look.px(4), look.px(4), look.px(4)) }) }
     }
 
@@ -428,7 +428,7 @@ class ShareActivity : Activity() {
     private fun targets(cascade: Boolean): View {
         val images = items.count { it.image }
         val ok = listOf(
-            if (items.any { it.audio }) "Transcribes it, then sends it" else "Sends it as a message",
+            when { items.any { it.audio } -> "Transcribes it, then sends it"; images > 0 -> "Sends the photo for Jharvis to read"; else -> "Sends it as a message" },
             "Adds the job to the board",
             if (images > 0) "Starts an edit with ${count(images, "photo")}" else "Starts an edit of this video")
         val why = reasons()
@@ -472,7 +472,7 @@ class ShareActivity : Activity() {
     }
 
     private fun pick(k: Int) = when (k) {
-        0 -> if (items.isEmpty()) sendText() else whenCopied { sendVoice() }
+        0 -> if (items.isEmpty()) sendText() else if (items.any { it.image }) whenCopied { sendPhoto() } else whenCopied { sendVoice() }
         1 -> sendJob()
         else -> checkFilm()
     }
@@ -513,6 +513,20 @@ class ShareActivity : Activity() {
                 if (!ok) { fail("Couldn't queue it. Try again."); return@runOnUiThread }
                 handedOff = true
                 done(up, if (up) "Sent" else "Sends when the PC is back", if (up) "Jharvis transcribes it first" else null)
+            }
+        }.start()
+    }
+
+    // A photo (a bill): the job makes HEIC or big photos a JPEG under 4 MB, then sends it; the result comes as a notification.
+    private fun sendPhoto() {
+        val p = items.first { it.image }
+        swap(waiting("Sending the photo"))
+        Thread {
+            val ok = ShareJob.photo(this, id, p.file!!.name, p.mime, Share.photoCaption(app, text)); val up = pcUp()
+            runOnUiThread {
+                if (!ok) { fail("Couldn't queue it. Try again."); return@runOnUiThread }
+                handedOff = true
+                done(up, if (up) "On its way" else "Sends when the PC is back", "You'll get a notification when Jharvis has it")
             }
         }.start()
     }

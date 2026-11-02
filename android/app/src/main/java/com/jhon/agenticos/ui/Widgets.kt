@@ -249,9 +249,9 @@ class WidgetsPage(c: Context, private val look: Look) : FrameLayout(c) {
     private val empty = LinearLayout(c).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_HORIZONTAL
         setPadding(look.px(24), look.px(64), look.px(24), look.px(16))
-        addView(look.text("No widgets yet", 20f, look.ink, true).apply { gravity = Gravity.CENTER })
+        addView(look.text("No widgets yet", 20f, look.ink, true).apply { gravity = Gravity.CENTER; look.legible(this) })
         addView(look.text("Add the ones you check most, like your calendar or notes.", 15f, look.ink2).apply {
-            gravity = Gravity.CENTER; setPadding(0, look.px(6), 0, 0)
+            gravity = Gravity.CENTER; setPadding(look.px(2), look.px(6), look.px(2), 0); look.legible(this)
         })
     }
     private val foot = FrameLayout(c)
@@ -291,7 +291,7 @@ class WidgetsPage(c: Context, private val look: Look) : FrameLayout(c) {
 
     init {
         column.addView(look.text("Widgets", 34f, look.ink, true).apply {
-            letterSpacing = -0.025f; setPadding(look.px(4), 0, look.px(4), look.px(14))
+            letterSpacing = -0.025f; setPadding(look.px(4), 0, look.px(4), look.px(14)); look.legible(this)
         })
         column.addView(empty, LinearLayout.LayoutParams(-1, -2))
         column.addView(foot, LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(4) })

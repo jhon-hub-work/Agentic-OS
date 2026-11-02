@@ -2,13 +2,22 @@ import { ArrowSquareOut, X } from '@phosphor-icons/react'
 import { AnimatePresence, motion, useMotionValue, type HTMLMotionProps } from 'motion/react'
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
 import { spring } from '../ui'
+import type { PlainAsk } from '../api'
+import { PlainWhy } from './Approvals'
 import JharvisTalk, { type Mood } from '../JharvisTalk'
 import { isPopped, needLine, popOut } from '../PanelWindow'
 import WaveField, { type DotShape } from '../WaveField'
 
-type Panel = { id: string; title: string; lines: string[] }
-type Ask = { id: string; tool: string; args: Record<string, unknown> }
-type Need = { kind: string; title: string; detail?: string; action?: string; link?: string }
+type Panel = { id: string; title: string; lines: string[]; details?: string } & PlainAsk
+type Ask = { id: string; tool: string; args: Record<string, unknown>; details?: string } & PlainAsk
+type Need = { kind: string; title: string; detail?: string; details?: string; action?: string; link?: string }
+/** The technical text, closed until he opens it. */
+const Fold = ({ text }: { text?: string }) => text ? (
+  <details className="mt-2" onPointerDown={e => e.stopPropagation()}>
+    <summary className="cursor-pointer text-xs text-ink-3">Details</summary>
+    <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white/60 p-3 font-mono text-xs text-ink">{text}</pre>
+  </details>
+) : null
 // stored error text can carry mangled emoji (e.g. "â±"); keep the readable part, first line only
 const clean = (t: string) => t.split('\n')[0].replace(/[^\x20-\x7E‘’“”–—]+/g, ' ').replace(/\s+/g, ' ').trim()
 // ?demo in the URL shows sample panels and cycles the wave colours, for design review
@@ -136,10 +145,16 @@ export default function Home() {
         <div key={side} className={`absolute top-[20%] flex w-[min(340px,44vw)] flex-col gap-4 ${side === 'left' ? 'left-0 md:left-6' : 'right-0 md:right-6'}`}>
           {side === 'right' && asks.map(a => (
             <Glass key={a.id} id={`ask-${a.id}`} label="Jharvis asks" bounds={area} className="border-2 border-navy/40">
-              <h2 className="mb-2 text-[15px] font-medium tracking-tight text-ink">Jharvis asks: {a.tool.replace(/_/g, ' ')}</h2>
-              <pre className="mb-4 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white/60 p-3 font-mono text-xs text-ink">
-                {typeof a.args.command === 'string' ? a.args.command : JSON.stringify(a.args, null, 2)}
-              </pre>
+              {a.what ? <>
+                <h2 className="mb-2 text-[15px] font-medium tracking-tight text-ink">{a.what}</h2>
+                <PlainWhy a={a} />
+                <div className="mb-4"><Fold text={a.details} /></div>
+              </> : <>  {/* a card from before the plain words */}
+                <h2 className="mb-2 text-[15px] font-medium tracking-tight text-ink">Jharvis asks: {a.tool.replace(/_/g, ' ')}</h2>
+                <pre className="mb-4 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white/60 p-3 font-mono text-xs text-ink">
+                  {typeof a.args.command === 'string' ? a.args.command : JSON.stringify(a.args, null, 2)}
+                </pre>
+              </>}
               <div className="flex items-center justify-center gap-3">
                 <button type="button" disabled={deciding === a.id} onClick={() => decide(a.id, true)}
                   className="chrome min-h-11 min-w-28 cursor-pointer rounded-full px-6 text-sm font-medium disabled:opacity-50">Approve</button>
@@ -157,6 +172,7 @@ export default function Home() {
                   <li key={k} className="text-sm leading-snug">
                     <p className={n.kind === 'problem' ? 'text-bad' : 'text-ink'}>{clean(n.title)}</p>
                     {n.detail && <p className="mt-0.5 text-xs text-ink-3">{clean(n.detail)}</p>}
+                    <Fold text={n.details} />
                     {n.link && <a href={n.link} className="mt-1 inline-block text-xs font-medium text-navy underline underline-offset-2">{n.action ?? 'Open'}</a>}
                   </li>
                 ))}
@@ -173,6 +189,9 @@ export default function Home() {
                 <ul className="flex flex-col gap-2">
                   {p.lines.map((l, k) => <li key={k} className="text-sm leading-snug text-ink-2">{l}</li>)}
                 </ul>
+                {p.what && <p className="mt-3 text-sm font-medium leading-snug text-ink">{p.what}</p>}
+                <PlainWhy a={p} className="mt-1 text-sm" />
+                <Fold text={p.details} />
               </Glass>
             ))}
           </AnimatePresence>

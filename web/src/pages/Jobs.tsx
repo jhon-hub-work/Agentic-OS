@@ -136,7 +136,7 @@ function JobCard({ j, who }: { j: JobPost; who: string }) {
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const [err, setErr] = useState('')
-  const act = async (d: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up') => {
+  const act = async (d: 'approve' | 'skip' | 'applied' | 'replied' | 'followed_up' | 'closed' | 'skip_followup') => {
     setBusy(true); setErr('')
     try { await api.decideJob(j.id, d, who) } catch (x) { setErr((x as Error).message) } finally { setBusy(false) }
   }
@@ -158,10 +158,13 @@ function JobCard({ j, who }: { j: JobPost; who: string }) {
       {j.problem && <p className="text-sm text-bad">Draft held back: {j.problem}</p>}
       {j.status === 'handoff' && <p className="text-sm text-warn">Finish on PC: {j.apply_result}</p>}
       {j.status === 'applying' && <p className="text-sm text-ink-2">Applying now…</p>}
-      {j.status === 'applied' && j.apply_result && <p className="text-sm text-ok">Sent</p>}
+      {j.status === 'applied' && (j.apply_result === 'submitted' || j.applied_by === 'owner') && <p className="text-sm text-ok">Sent</p>}
+      {j.status === 'applied' && j.apply_result && j.apply_result !== 'submitted' && j.applied_by !== 'owner' && <p className="text-sm text-warn">Not sent: {j.apply_result}</p>}
+      {j.status === 'closed' && <p className="text-sm text-ink-3">Job closed</p>}
       {j.status === 'replied' && <p className="text-sm text-ok">They replied</p>}
       {j.follow_up === 'due' && j.status === 'applied' && <>
-        <p className="text-sm text-warn">No reply in 48 h. {j.followup_problem ? `Not sent: ${j.followup_problem}. ` : ''}Send this follow-up:</p>
+        <p className="text-sm text-warn">No reply in 48 h. {j.followup_problem ? `Not sent: ${j.followup_problem}. ` : ''}
+          {/onlinejobs\.ph|reddit\.com\//.test(j.url) ? 'This follow-up goes out by itself on the next job run:' : 'Send this follow-up:'}</p>
         {j.followup_draft && <p className="whitespace-pre-wrap rounded-2xl border border-white bg-white/55 p-3 text-sm text-ink">{j.followup_draft}</p>}
       </>}
       {j.draft && (
@@ -178,7 +181,9 @@ function JobCard({ j, who }: { j: JobPost; who: string }) {
         </>}
         {j.follow_up === 'due' && j.status === 'applied' && j.followup_draft && <button onClick={() => copy(j.followup_draft)} className={btn}><Copy size={14} aria-hidden="true" />Copy follow-up</button>}
         {j.follow_up === 'due' && j.status === 'applied' && <button onClick={() => act('followed_up')} disabled={busy} className={btn}><Check size={14} aria-hidden="true" />I followed up</button>}
+        {j.follow_up === 'due' && j.status === 'applied' && <button onClick={() => act('skip_followup')} disabled={busy} className={btn}><X size={14} aria-hidden="true" />Skip follow-up</button>}
         {j.status === 'applied' && <button onClick={() => act('replied')} disabled={busy} className={btn}><Check size={14} aria-hidden="true" />Got a reply</button>}
+        {j.status === 'applied' && <button onClick={() => act('closed')} disabled={busy} className={btn}><X size={14} aria-hidden="true" />Job closed</button>}
         {j.status === 'handoff' && <button onClick={() => act('applied')} disabled={busy} className={btn}><Check size={14} aria-hidden="true" />I applied</button>}
       </div>
       {err && <p role="alert" className="text-sm text-bad">{err}</p>}

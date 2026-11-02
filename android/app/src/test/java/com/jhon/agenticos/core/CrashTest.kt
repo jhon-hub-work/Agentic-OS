@@ -98,6 +98,17 @@ class CrashTest {
         assertEquals("1970-01-01 00:00:00 x:core reason 99 pid 1", Crash.exitLine(0, "x:core", 99, 1, null, ZoneOffset.UTC))
     }
 
+    // Jhon, 2 Nov: Settings showed three "package updated" lines from an install as "Recent problems"
+    @Test fun onlyCrashesAndFreezesAreProblems() {
+        fun line(r: Int) = Crash.exitLine(0, "com.jhon.agenticos", r, 7, "stop com.jhon.agenticos", ZoneOffset.UTC)
+        for (r in listOf(ApplicationExitInfo.REASON_CRASH, ApplicationExitInfo.REASON_CRASH_NATIVE, ApplicationExitInfo.REASON_ANR,
+                ApplicationExitInfo.REASON_INITIALIZATION_FAILURE, ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE))
+            assertTrue(line(r), Crash.isProblem(line(r)))
+        for (r in listOf(ApplicationExitInfo.REASON_PACKAGE_UPDATED, ApplicationExitInfo.REASON_USER_REQUESTED,
+                ApplicationExitInfo.REASON_EXIT_SELF, ApplicationExitInfo.REASON_LOW_MEMORY, ApplicationExitInfo.REASON_SIGNALED))
+            assertFalse(line(r), Crash.isProblem(line(r)))
+    }
+
     @Test fun exitLogIsCapped() {
         val f = file()
         Crash.appendLog(f, (1..40).map { "a$it" })

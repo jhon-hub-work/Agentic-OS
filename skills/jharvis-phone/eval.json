@@ -1,0 +1,7 @@
+{
+  "criteria": [
+    { "name": "task_done_on_phone", "weight": 0.5 },
+    { "name": "stayed_in_scope", "weight": 0.3 },
+    { "name": "reported_result", "weight": 0.2 }
+  ]
+}

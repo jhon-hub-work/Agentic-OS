@@ -71,14 +71,15 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
     private var onDigest: (() -> Unit)? = null
     private var digestOpen = false
 
-    private val stale = look.text("", 13f, look.warn).apply { visibility = GONE; setPadding(look.px(4), 0, look.px(4), look.px(10)) }
-    private val empty = look.text("Nothing needs you", 15f, look.ink3).apply {
+    // these two sit straight on the wallpaper: its inks, not the theme's
+    private val stale = look.text("", 13f, look.bare.warn).apply { visibility = GONE; setPadding(look.px(4), 0, look.px(4), look.px(10)); look.legible(this) }
+    private val empty = look.text("Nothing needs you", 15f, look.bare.ink3).apply {
         gravity = Gravity.CENTER; visibility = GONE; setPadding(0, look.px(14), 0, look.px(14))
         look.legible(this)
     }
     private val pill = look.text("What Jharvis did today", 15f, look.ink2).apply {
         gravity = Gravity.CENTER; minHeight = look.px(48); setPadding(look.px(22), 0, look.px(22), 0)
-        background = look.glassCard(99)
+        background = look.wallGlass(99)
         isClickable = true; look.press(this, 0.95f)
         setOnClickListener { host.openLog(it) }
     }
@@ -365,6 +366,7 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
         private val hi = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = look.px(1).toFloat() }
         private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = look.px(2) * 0.75f; color = look.withAlpha(look.navy, 70) }
         private val shadow = Paint(Paint.ANTI_ALIAS_FLAG)
+        private val tint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = look.cardTint }  // over a wallpaper only
         private val glass = LiquidGlass(this, look)  // real refraction over the wave; the drawn fill where it can't run
 
         init {
@@ -410,14 +412,14 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
         private fun bindAsk(a: JSONObject) {
             val id = a.optString("id")
             body.addView(look.text("Jharvis asks", 13f, look.ink3))
-            body.addView(heading(PanelLogic.humanise(a.optString("tool")), 17f), LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(2) })
-            // all of it, selectable: an approval is only as good as what he could read before tapping
-            val args = PanelLogic.argsText(a.opt("args"))
-            if (args.isNotEmpty()) body.addView(look.text(args, 13f, look.ink).apply {
-                typeface = Typeface.MONOSPACE; setTextIsSelectable(true)
-                background = look.round(look.white(115), 16)
-                setPadding(look.px(12), look.px(10), look.px(12), look.px(10))
-            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(10) })
+            val plain = PanelLogic.plain(a)
+            body.addView(heading(plain?.what ?: PanelLogic.humanise(a.optString("tool")), 17f), LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(2) })
+            if (plain != null) plainLines(body, plain)  // why and if he says no, in plain words; the exact request folded away
+            else {
+                // an older card: all of it, selectable, since an approval is only as good as what he could read before tapping
+                val args = PanelLogic.argsText(a.opt("args"))
+                if (args.isNotEmpty()) body.addView(code(args), LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(10) })
+            }
             val done = status(a)
             if (done != null) {
                 body.addView(look.text(done, 15f, look.ink2).apply { minHeight = look.px(48); gravity = Gravity.CENTER_VERTICAL },
@@ -443,11 +445,13 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
                 orientation = LinearLayout.VERTICAL
                 setPadding(0, look.px(8), 0, look.px(4))
                 val problem = i.optString("kind") == "problem"
-                addView(look.text(i.optString("title"), 15f, if (problem) look.bad else look.ink))
-                i.optString("detail").takeIf { it.isNotEmpty() }?.let { addView(look.text(it, 13f, look.ink3).apply { setPadding(0, look.px(2), 0, 0) }) }
+                val plain = PanelLogic.plain(i)
+                addView(look.text(plain?.what ?: i.optString("title"), 15f, if (problem) look.bad else look.ink))
+                if (plain != null) plainLines(this, plain)
+                else i.optString("detail").takeIf { it.isNotEmpty() }?.let { addView(look.text(it, 13f, look.ink3).apply { setPadding(0, look.px(2), 0, 0) }) }
                 val link = i.optString("link")
                 if (link.isNotEmpty()) {
-                    addView(look.text(i.optString("action").ifEmpty { "Open" }, 15f, look.navy, true).apply {
+                    addView(look.text(i.optString("action").ifEmpty { "Open" }, 15f, look.accentInk, true).apply {
                         minHeight = look.px(48); gravity = Gravity.CENTER_VERTICAL
                     })
                     isClickable = true; look.press(this, 0.97f)
@@ -456,6 +460,32 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
                     addView(look.text(i.optString("action"), 13f, if (problem) look.bad else look.ink2).apply { setPadding(0, look.px(4), 0, 0) })
                 }
             })
+        }
+
+        /** The plain lines under a heading: why, then what happens if he says no, then a closed Details row that opens
+         *  onto the exact technical text. */
+        private fun plainLines(into: LinearLayout, p: PanelLogic.Plain) {
+            for (line in listOf(p.why, PanelLogic.ifNoLine(p.ifNo))) if (line.isNotEmpty())
+                into.addView(look.text(line, 15f, look.ink2), LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(6) })
+            if (p.details.isEmpty()) return
+            val box = code(p.details).apply { visibility = GONE }
+            into.addView(look.text("Show details", 15f, look.ink2, true).apply {
+                minHeight = look.px(48); gravity = Gravity.CENTER_VERTICAL
+                isClickable = true; look.press(this, 0.97f)
+                setOnClickListener {
+                    val open = box.visibility != VISIBLE
+                    box.visibility = if (open) VISIBLE else GONE
+                    text = if (open) "Hide details" else "Show details"
+                }
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(4) })
+            into.addView(box, LinearLayout.LayoutParams(-1, -2))
+        }
+
+        /** Technical text as itself: monospace, selectable, on a light plate. */
+        private fun code(s: String) = look.text(s, 13f, look.ink).apply {
+            typeface = Typeface.MONOSPACE; setTextIsSelectable(true)
+            background = look.round(look.white(115), 16)
+            setPadding(look.px(12), look.px(10), look.px(12), look.px(10))
         }
 
         private fun bindDigest(items: List<JSONObject>) {
@@ -580,8 +610,13 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
             canvas.restore()
             // the top card (or every card, fanned) is real liquid glass with the fill as a lighter tint; plates behind
             // stay drawn, so only the visible panels pay for the effect
+            // over a wallpaper the theme's tint goes under the fill, so the card's ink reads whatever the picture
             fill.alpha = 150
-            if (inert || !glass.draw(canvas, rect, r, fill)) { fill.alpha = 255; canvas.drawRoundRect(rect, r, r, fill) }
+            val tinted = look.cardTint != 0
+            if (inert || !glass.draw(canvas, rect, r, if (tinted) tint else fill)) {
+                if (tinted) canvas.drawRoundRect(rect, r, r, tint)
+                fill.alpha = 255; canvas.drawRoundRect(rect, r, r, fill)
+            } else if (tinted) canvas.drawRoundRect(rect, r, r, fill)
             canvas.save(); canvas.clipPath(path); canvas.translate(0f, plateTop)
             canvas.drawRect(0f, 0f, width.toFloat(), g - plateTop, streak)
             canvas.restore()
@@ -729,7 +764,26 @@ internal object PanelLogic {
         else -> null
     }
 
-    fun askSig(a: JSONObject, status: String?) = a.optString("id") + "\n" + a.optString("tool") + "\n" + argsText(a.opt("args")) + "\n" + status.orEmpty()
+    fun askSig(a: JSONObject, status: String?) = a.optString("id") + "\n" + a.optString("tool") + "\n" + argsText(a.opt("args")) + "\n" +
+        status.orEmpty() + "\n" + plain(a)?.let { listOf(it.what, it.why, it.ifNo, it.details).joinToString("\n") }.orEmpty()
+
+    /** The plain words an approval or a need carries for Jhon (what / why / if_no) and the technical text for its
+     *  closed Details row (details, else the request itself). null = an older card without them: shown as before. */
+    class Plain(val what: String, val why: String, val ifNo: String, val details: String)
+
+    fun plain(o: JSONObject): Plain? {
+        fun str(k: String) = if (o.isNull(k)) "" else o.optString(k).trim()
+        val what = str("what")
+        if (what.isEmpty()) return null
+        return Plain(what, str("why"), str("if_no"), str("details").ifEmpty { argsText(o.opt("args")) })
+    }
+
+    /** What a no costs, worded like the dashboard: "If you say no: nothing is sent." An acronym or "I" keeps its capital. */
+    fun ifNoLine(s: String): String {
+        if (s.isEmpty()) return ""
+        val keep = s.length > 1 && !s[1].isLowerCase()  // "PC ...", "I won't ..."
+        return "If you say no: " + if (keep) s else s[0].lowercaseChar() + s.substring(1)
+    }
 
     fun panelSig(p: JSONObject) = p.optString("title") + "\n" + (p.optJSONArray("lines")?.toString() ?: "")
 

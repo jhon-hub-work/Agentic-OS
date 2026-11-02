@@ -221,5 +221,13 @@ def comment_dm(key: str, zernio_post_id: str, handle: str, slides: list, keyword
         "commentReply": "Sent you a DM 📩", "repeatPolicy": {"mode": "once"}})
 
 
-LINKEDIN_FORMAT = ("Reply with ONLY the LinkedIn post text, ready to publish: a strong first line, short paragraphs, "
-                   "a plain takeaway, at most 3 hashtags at the end. Under 1,300 characters. No preamble, no quotes around it.")
+# Jhon 2 Nov: the agent's research notes ("Jhon, I'll check...") were posted with the text, so the post is fenced
+LINKEDIN_FORMAT = ("Reply with the LinkedIn post text, ready to publish: a strong first line, short paragraphs, "
+                   "a plain takeaway, at most 3 hashtags at the end. Under 1,300 characters. No quotes around it. "
+                   "Put the finished post between <post> and </post>; anything outside them (notes, plans) is never posted.")
+
+
+def linkedin_text(out: str) -> str:
+    """The last <post>...</post> block of the agent's reply; "" when there is none (nothing gets posted)."""
+    m = re.findall(r"<post>(.*?)</post>", out, re.S | re.I)
+    return re.sub(r"^```\w*\n|\n```$", "", m[-1].strip()).strip() if m else ""

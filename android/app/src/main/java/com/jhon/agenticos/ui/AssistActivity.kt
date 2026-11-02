@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -32,6 +33,15 @@ import kotlin.math.abs
  *  :core) does the listening and speaking and tells this screen where the turn is (ListenService.STATE). Tap
  *  anywhere or Back closes it; Jharvis keeps listening for the window either way. */
 class AssistActivity : Activity() {
+    companion object {
+        /** Home hides its own orb while this overlay is up (true), so only one orb shows over a frosted Home. Main thread. */
+        var showing: ((Boolean) -> Unit)? = null
+        /** Home's orb while Home is on screen showing it, else null: this overlay's orb starts there and glides down, so
+         *  the two read as one orb. Main thread. */
+        var homeOrb: (() -> JharvisOrb?)? = null
+        private const val HAND_OVER_MS = 48L  // after our first frame: the window is on screen before Home's orb goes
+    }
+
     private enum class Phase { LISTENING, HEARING, THINKING, SPEAKING, DONE, OFFLINE }
 
     private val main = Handler(Looper.getMainLooper())
@@ -45,6 +55,10 @@ class AssistActivity : Activity() {
     private lateinit var said: TextView
     private lateinit var reply: TextView
     private lateinit var presence: Spring
+    private lateinit var glide: Spring   // our orb: 0 = sitting on Home's orb, 1 = at its spot at the bottom
+    private var home: JharvisOrb? = null // Home's orb when we opened over it (null: ours rises from below)
+    private var handed = false           // Home's orb has stepped out and ours carries on
+    private val screenAt = IntArray(2)
     private var phase = Phase.LISTENING
     private var still = false
     private var blurOn = true
@@ -57,6 +71,14 @@ class AssistActivity : Activity() {
     private val blurChanged = Consumer<Boolean> { on -> blurOn = on; veilColour(); arrive(presence.value) }
     private val stirLoop = object : Runnable { override fun run() { wave.stir(); main.postDelayed(this, 1800) } }
     private val nothingSaid = Runnable { if (phase == Phase.LISTENING) dismiss() }
+    private val handOver = Runnable {
+        if (!handed && !leaving) {
+            handed = true
+            showing?.invoke(true)  // Home's orb goes on the same frame ours starts to move
+            wave.live = true       // a grey (PC off) Home orb lights up on its way down, as the overlay's always has
+            glide.to(1f, response = 0.5f, damping = 1f)
+        }
+    }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
@@ -74,13 +96,27 @@ class AssistActivity : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_BLUR_BEHIND)
         window.isNavigationBarContrastEnforced = false
 
+        home = if (still) null else homeOrb?.invoke()
         build()
         setContentView(root)
+        if (home == null) showing?.invoke(true)
+        else if (Build.VERSION.SDK_INT >= 34) {  // our orb is Home's: the window appears and leaves in place, no slide
+            overrideActivityTransition(OVERRIDE_TRANSITION_OPEN, 0, 0)
+            overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, 0, 0)
+        } else inPlace()
         if (Color.luminance(look.ground) > 0.5f) window.insetsController?.setSystemBarsAppearance(
             WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
             WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS)
 
         presence = Spring(0f, 0.002f) { arrive(it) }
+        glide = Spring(0f, 0.0005f) { placeOrb() }
+        home?.let { h ->
+            wave.match(h)
+            wave.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeOrb() }
+            // the overlay's first frame shows our orb exactly over Home's; then Home's steps out and ours glides down
+            root.viewTreeObserver.registerFrameCommitCallback { main.postDelayed(handOver, HAND_OVER_MS) }
+            main.postDelayed(handOver, 400)  // in case no frame commit is reported
+        }
         blurOn = windowManager.isCrossWindowBlurEnabled
         windowManager.addCrossWindowBlurEnabledListener(mainExecutor, blurChanged)  // battery saver can switch blur off
         veilColour()
@@ -111,6 +147,7 @@ class AssistActivity : Activity() {
         stage = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             alpha = 0f
+            listOf(status, said, reply).forEach(look::halo)  // over any app, bright or dark: the ground behind the letters
             addView(status)
             addView(said, LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(10) })
             addView(reply, LinearLayout.LayoutParams(-1, -2).apply { topMargin = look.px(18) })
@@ -230,8 +267,8 @@ class AssistActivity : Activity() {
         veil.alpha = p
         glow.presence = p
         stage.alpha = p
-        wave.alpha = p
-        if (!still) {
+        if (home == null) wave.alpha = p
+        if (!still && home == null) {
             val k = 0.92f + 0.08f * p
             wave.scaleX = k; wave.scaleY = k
             wave.translationY = (1 - p) * look.px(28)
@@ -244,6 +281,22 @@ class AssistActivity : Activity() {
         }
     }
 
+    /** Our orb between Home's orb (glide 0) and its own spot at the bottom (1): centre and size ride one spring, so it
+     *  reads as Home's orb gliding down and back. Only when we opened over Home; arrive() moves it otherwise. */
+    private fun placeOrb() {
+        val h = home ?: return
+        if (wave.width == 0) return
+        val from = h.lensOnScreen()
+        root.getLocationOnScreen(screenAt)
+        val own = OrbMath.LENS * minOf(wave.width, wave.height)
+        val g = glide.value; val q = 1 - g
+        val k = (from[2] * q + own * g) / own
+        wave.translationX = (from[0] - screenAt[0] - (wave.left + wave.width / 2f)) * q
+        wave.translationY = (from[1] - screenAt[1] - (wave.top + wave.height / 2f)) * q
+        wave.scaleX = k; wave.scaleY = k; wave.zoom = k
+        wave.alpha = 1f
+    }
+
     /** Ice over the app behind: lighter when the system frosts it, nearly solid when blur is off. */
     private fun veilColour() {
         val a = if (blurOn) 0.62f else 0.88f
@@ -254,9 +307,21 @@ class AssistActivity : Activity() {
         if (leaving) return
         leaving = true
         main.removeCallbacksAndMessages(null)
-        presence.onRest = { finish() }
+        val h = home
+        if (h == null) {
+            showing?.invoke(false)  // Home's orb comes back as this one sinks away
+            presence.onRest = { finish() }
+        } else {
+            // ours glides back up onto Home's spot; there Home's orb shows again on the same frame and we go in place
+            wave.live = h.live
+            glide.onRest = { h.match(wave); showing?.invoke(false); finish(); inPlace() }
+            glide.to(0f, response = 0.5f, damping = 1f)
+        }
         presence.to(0f, response = 0.32f)
     }
+
+    @Suppress("DEPRECATION")  // overridePendingTransition: only the API 33 path
+    private fun inPlace() { if (Build.VERSION.SDK_INT < 34) overridePendingTransition(0, 0) }
 
     // switched away (Jharvis opened an app, or he pressed Home): the overlay goes with it
     override fun onStop() {
@@ -267,7 +332,8 @@ class AssistActivity : Activity() {
     override fun onDestroy() {
         main.removeCallbacksAndMessages(null)
         if (::presence.isInitialized) {
-            presence.stop()
+            showing?.invoke(false)
+            presence.stop(); glide.stop()
             try { unregisterReceiver(rx) } catch (_: IllegalArgumentException) {}
             windowManager.removeCrossWindowBlurEnabledListener(blurChanged)
         }

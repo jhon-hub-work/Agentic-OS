@@ -214,6 +214,60 @@ class ClaudeGuardTests(unittest.TestCase):
             s.auto_apply_clean()
         self.assertEqual([c.args[0] for c in decide.call_args_list], ["o1"])  # the Claude-filled form waits
 
+    def scheduled_heartbeat(self, usage, reply, agent="auto", job_kind=True):
+        """One heartbeat (SKILL.md 'Primary: claude') with mocked agents -> (agents called, job_done event or API result)."""
+        import json
+        from unittest import mock
+        import scheduler.scheduler as sched
+        s = self.s
+        self.use(usage)
+        d = s.BASE_DIR / "skills" / "heartbeat"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "SKILL.md").write_text("# Heartbeat\nPrimary: claude\n")
+        (d / "learnings.md").write_text("# Learnings\n")
+        s._resting.clear()
+        calls = []
+        def fake(a, message, model="", effort=""):
+            calls.append(a)
+            return reply(a)
+        with mock.patch.object(s, "_execute_agent", side_effect=fake), mock.patch.object(sched, "emit_event") as emit:
+            if job_kind:
+                s.run_scheduled({"id": "hb", "name": "Heartbeat", "kind": "skill", "skill": "heartbeat", "agent": agent}, "cron")
+                out = emit.call_args.args[0]
+            else:
+                out = s.run_skill("heartbeat", s.SkillRunRequest(agent=agent))
+        s._resting.clear()
+        audit = [json.loads(l) for l in (s.BASE_DIR / "audit" / "audit.log").read_text().splitlines()]
+        skill_run = [e for e in audit if e.get("action") == "skill_run" and e.get("skill") == "heartbeat"][-1]
+        last = (d / "learnings.md").read_text(encoding="utf-8").rstrip().splitlines()[-1]
+        return calls, out, skill_run, last
+
+    def test_scheduled_heartbeat_guarded(self):
+        """TKT-0018: a scheduled heartbeat never calls Claude when usage is over the limit or unknown."""
+        s = self.s
+        for usage in ({"five_hour": 95, "seven_day": 20}, {"five_hour": 10, "seven_day": 95}, None):
+            calls, done, skill_run, last = self.scheduled_heartbeat(usage, lambda a: f"{a} health report")
+            self.assertNotIn("claude", calls, usage)
+            self.assertEqual(calls, [s.BACKGROUND_DEFAULT])
+            self.assertEqual(done["type"], "job_done")
+            self.assertEqual(done["output"], f"{s.BACKGROUND_DEFAULT} health report")
+            self.assertEqual(skill_run["agent"], s.BACKGROUND_DEFAULT)
+            self.assertIn(f"{s.BACKGROUND_DEFAULT} ", last)
+        # every fallback out: recorded as failed, still no Claude
+        calls, done, skill_run, last = self.scheduled_heartbeat(None, lambda a: f"{a} failed: HTTP 429 quota")
+        self.assertNotIn("claude", calls)
+        self.assertEqual([done["status"], skill_run["status"]], ["failed", "failed"])
+        self.assertIn("FAILED", last)
+
+    def test_scheduled_heartbeat_unguarded_cases(self):
+        s = self.s
+        calls, done, _, _ = self.scheduled_heartbeat({"five_hour": 10, "seven_day": 20}, lambda a: "ok")
+        self.assertEqual(calls, ["claude"])                                          # under the limits: Claude runs
+        calls, _, _, _ = self.scheduled_heartbeat(None, lambda a: "ok", agent="opencode")
+        self.assertEqual(calls, ["opencode"])                                        # a non-Claude pick stands
+        calls, res, _, _ = self.scheduled_heartbeat(None, lambda a: "ok", job_kind=False)
+        self.assertEqual((calls, res["agent"]), (["claude"], "claude"))              # started by Jhon: never blocked
+
     def test_smart_falls_back_to_codex_then_claude(self):
         from unittest import mock
         s = self.s

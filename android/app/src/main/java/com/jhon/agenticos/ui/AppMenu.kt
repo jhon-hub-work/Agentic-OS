@@ -32,6 +32,7 @@ import android.view.WindowInsets
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Toast
 import android.window.BackEvent
 import android.window.OnBackAnimationCallback
@@ -40,7 +41,8 @@ import android.window.OnBackInvokedDispatcher
 import com.jhon.agenticos.R
 
 /** Press and hold an app: the icon lifts out, the window blurs back, and a frosted menu grows out of the icon with
- *  the app's latest notifications, its shortcuts, Add to dock, Hide app, Lock app, App info and Delete app. Call from
+ *  the app's latest notifications, its shortcuts, Add to dock, Move to group (Smart groups layout), Hide app, Lock app,
+ *  App info and Delete app. Call from
  *  any long-press in any UI Activity: `AppMenu.show(iconView, key, look, actions)`, key = an app key (a plain package
  *  works). Pass the icon view (what gets lifted is a snapshot of it). What the menu lists is read on the loader
  *  thread first, so nothing decodes or asks the system on the main thread. */
@@ -51,6 +53,7 @@ object AppMenu {
     }
 
     private var current: Menu? = null  // one menu at a time
+    val isOpen get() = current != null  // Sphere holds its idle spin while a menu is up
     private var asking = 0             // a newer long-press wins over a menu still being read
 
     fun show(anchor: View, pkg: String, look: Look, actions: Actions) = open(anchor, pkg, look, actions, null, null)
@@ -68,7 +71,7 @@ object AppMenu {
         val token = ++asking
         val dpi = act.resources.displayMetrics.densityDpi
         Loader.first {
-            val data = if (pin != null) Data(emptyList(), emptyList(), false, false, false, null, true, null) else Data.load(app, key, dpi)
+            val data = if (pin != null) Data(emptyList(), emptyList(), false, false, false, null, true, null, null) else Data.load(app, key, dpi)
             Loader.main.post {
                 if (token != asking || activityOf(anchor) == null) return@post  // scrolled away or the screen closed meanwhile
                 current?.dismissNow()
@@ -86,7 +89,8 @@ object AppMenu {
 
     /** Everything the menu shows, read on the loader thread. */
     private class Data(val cuts: List<Pair<ShortcutInfo, Drawable?>>, val notes: List<AppBadges.Note>, val removable: Boolean,
-                       val hidden: Boolean, val locked: Boolean, val entry: AppEntry?, val main: Boolean, val label: String?) {
+                       val hidden: Boolean, val locked: Boolean, val entry: AppEntry?, val main: Boolean, val label: String?,
+                       val group: String?) {  // its Smart group, only while that layout is in use
         companion object {
             fun load(c: Context, key: String, dpi: Int): Data {
                 val pkg = AppKey.pkg(key)
@@ -103,7 +107,9 @@ object AppMenu {
                     val f = c.packageManager.getApplicationInfo(pkg, 0).flags
                     (f and ApplicationInfo.FLAG_SYSTEM) == 0 || (f and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0  // updated system apps can drop updates
                 } catch (_: Exception) { false }
-                return Data(cuts, notes, removable, hidden, locked, e, main, e?.label)
+                // hidden apps sit in no group
+                val group = if (e != null && !hidden && Layouts.current(c) == Layouts.GROUPS) AppGroups.groups(c, listOf(e))[key] else null
+                return Data(cuts, notes, removable, hidden, locked, e, main, e?.label, group)
             }
 
             /** Dynamic, manifest and pinned shortcuts: manifest first, then dynamic, then pinned only; by rank; four at most. */
@@ -121,24 +127,34 @@ object AppMenu {
 
     /** Where the menu goes (window px). Below the icon if it fits, else above; horizontally it hugs the icon's side of
      *  the screen (left edges line up, or right edges). Too tall for either: beside the icon (left of it on the right
-     *  half, right of it otherwise), centred on it and clamped, never over it; w narrows when that side is short. */
-    internal data class Spot(val x: Int, val y: Int, val above: Boolean, val w: Int)
+     *  half, right of it otherwise), centred on it and clamped, never over it; w narrows when that side is short. When
+     *  that side has less than minSide (an icon near the middle), it goes in the roomier of above or below instead, h
+     *  capped to that room so its rows scroll. h is the height to lay it out at (capped to the screen beside too). */
+    internal data class Spot(val x: Int, val y: Int, val above: Boolean, val w: Int, val h: Int)
 
     internal fun place(iconL: Int, iconT: Int, iconR: Int, iconB: Int, w: Int, h: Int,
-                       minX: Int, minY: Int, maxX: Int, maxY: Int, gap: Int): Spot {
+                       minX: Int, minY: Int, maxX: Int, maxY: Int, gap: Int, minSide: Int = 0): Spot {
         val left = (iconL + iconR) / 2 < (minX + maxX) / 2
         val x = (if (left) iconL else iconR - w).coerceIn(minX, maxOf(minX, maxX - w))
+        val below = maxY - iconB - gap; val up = iconT - gap - minY  // room under and over the icon
         val above = when {
-            iconB + gap + h <= maxY -> false
-            iconT - gap - h >= minY -> true
+            h <= below -> false
+            h <= up -> true
             else -> {
-                val mw = minOf(w, maxOf(1, if (left) maxX - iconR - gap else iconL - gap - minX))
-                val y = ((iconT + iconB) / 2 - h / 2).coerceIn(minY, maxOf(minY, maxY - h))
-                return Spot(if (left) iconR + gap else iconL - gap - mw, y, false, mw)
+                val side = if (left) maxX - iconR - gap else iconL - gap - minX
+                if (side < minSide) {  // too narrow beside: labels would be cut, so it scrolls above or below instead
+                    val top = up > below
+                    val ch = maxOf(1, if (top) up else below)
+                    return Spot(x, if (top) iconT - gap - ch else iconB + gap, top, w, ch)
+                }
+                val mw = minOf(w, maxOf(1, side))
+                val ch = minOf(h, maxY - minY)
+                val y = ((iconT + iconB) / 2 - ch / 2).coerceIn(minY, maxOf(minY, maxY - ch))
+                return Spot(if (left) iconR + gap else iconL - gap - mw, y, false, mw, ch)
             }
         }
         val y = (if (above) iconT - gap - h else iconB + gap).coerceIn(minY, maxOf(minY, maxY - h))
-        return Spot(x, y, above, w)
+        return Spot(x, y, above, w, h)
     }
 
     private class Menu(val act: Activity, val anchor: View, val key: String, val look: Look, val actions: Actions?, val data: Data,
@@ -153,6 +169,7 @@ object AppMenu {
         lateinit var shell: FrameLayout
         var closing = false
         var gone = false
+        var after: (() -> Unit)? = null  // what a pick still has to do once the menu is gone (hide, lock, dock)
         var back = 0f            // predictive back progress: the menu shrinks toward the icon as Back is dragged
         var from = 1f; var lift = 1.08f
         val spring = Spring(0f, 0.001f) { render(it) }
@@ -197,9 +214,10 @@ object AppMenu {
             val hw = anchor.width * lift / 2; val hh = anchor.height * lift / 2
             fun spotFor() = place((cx - hw).toInt(), (cy - hh).toInt(), (cx + hw).toInt(), (cy + hh).toInt(), w, h,
                 (ins?.left ?: 0) + g, (ins?.top ?: 0) + g / 2, decor.width - (ins?.right ?: 0) - g,
-                decor.height - (ins?.bottom ?: 0) - g / 2, look.px(12))
+                decor.height - (ins?.bottom ?: 0) - g / 2, look.px(12), look.px(240))
             var spot = spotFor()
             if (spot.w != w) { w = spot.w; h = measure(w); spot = spotFor() }  // narrowed beside the icon: rows may wrap, so place again
+            h = spot.h  // capped when there was no room: the rows scroll
             overlay.addView(shell, FrameLayout.LayoutParams(w, h))
             shell.translationX = spot.x.toFloat(); shell.translationY = spot.y.toFloat()
             shell.pivotX = (cx - spot.x).coerceIn(0f, w.toFloat())  // grows out of the icon's side
@@ -245,18 +263,20 @@ object AppMenu {
             shell.blur(look.px(8) * (1 - p))
         }
 
-        /** Same path out as in. `then` runs once it has gone (hide, dock); intents start right away instead. */
+        /** Same path out as in. `then` runs once it has gone (hide, dock), even when Home cuts the close short;
+         *  intents start right away instead. */
         fun close(then: (() -> Unit)? = null) {
             if (closing) return
             closing = true
+            after = then
             unregisterBack()
             scrim.setOnClickListener(null); scrim.isClickable = false  // taps fall through while it dissolves
             if (still) {
-                overlay.animate().alpha(0f).setDuration(120).withEndAction { remove(); then?.invoke() }.start()
+                overlay.animate().alpha(0f).setDuration(120).withEndAction { remove() }.start()
                 return
             }
             from = lift / 1.08f  // back to the icon's resting size, not the pressed squish it started from
-            spring.onRest = { remove(); then?.invoke() }
+            spring.onRest = { remove() }
             spring.to(0f, response = 0.36f, damping = 1f)
         }
 
@@ -271,6 +291,7 @@ object AppMenu {
             unregisterBack()
             content.blur(0f); content.scaleX = 1f; content.scaleY = 1f
             if (current === this) current = null
+            after?.let { after = null; it() }  // a quick Home press mid-close still hides, shows or locks the app
         }
 
         fun unregisterBack() = try { act.onBackInvokedDispatcher.unregisterOnBackInvokedCallback(backCb) } catch (_: Exception) {}
@@ -301,6 +322,7 @@ object AppMenu {
 
             val a = actions
             if (a != null && data.main) list.addView(row("Add to dock", null, R.drawable.ic_appmenu_dock, look.ink) { close { a.addToDock(pkg) } })
+            data.group?.let { g -> if (a != null) list.addView(groupRow(g, a)) }
             list.addView(row(if (data.hidden) "Show app" else "Hide app", null, if (data.hidden) R.drawable.ic_appmenu_show else R.drawable.ic_appmenu_hide, look.ink) {
                 close { HiddenApps.set(act, key, !data.hidden); a?.changed() }
             })
@@ -310,6 +332,34 @@ object AppMenu {
             list.addView(row("App info", null, R.drawable.ic_appmenu_info, look.ink) { info(); close() })
             if (data.removable) list.addView(row("Delete app", null, R.drawable.ic_appmenu_delete, look.bad) { delete() })
             return wrap(list)
+        }
+
+        /** "Move to group" (Smart groups only): the groups as a row of pills that scrolls sideways; the one it's in wears
+         *  the accent. A pick is his own move, kept over Jharvis's sort, and the layout re-sorts once it's shut. */
+        fun groupRow(now: String, a: Actions) = LinearLayout(act).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, look.px(8), 0, look.px(4))
+            addView(look.text("Move to group", 13f, look.ink3).apply { setPadding(look.px(16), 0, look.px(16), look.px(4)) })
+            val pills = LinearLayout(act).apply { setPadding(look.px(12), 0, look.px(12), 0) }
+            for (g in AppGroups.NAMES) {
+                val on = g == now
+                pills.addView(look.text(g, 15f, if (on) look.accentInk else look.ink, on).apply {
+                    gravity = Gravity.CENTER; minHeight = look.px(48)
+                    setPadding(look.px(14), 0, look.px(14), 0)
+                    background = if (on) look.round(look.withAlpha(look.glacier, 36), 99, look.glacier) else look.round(look.inkA(14), 99)
+                    contentDescription = if (on) "$g, in this group now" else "Move to $g"
+                    isClickable = true; look.press(this, 0.92f)
+                    setOnClickListener {
+                        if (closing || on) return@setOnClickListener
+                        performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                        close { AppGroups.move(act, key, g); a.changed() }
+                    }
+                }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = look.px(6) })
+            }
+            addView(android.widget.HorizontalScrollView(act).apply {
+                isHorizontalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                addView(pills)
+            }, LinearLayout.LayoutParams(-1, -2))
         }
 
         fun lock() {
@@ -356,7 +406,13 @@ object AppMenu {
                 elevation = look.px(24).toFloat()
                 outlineSpotShadowColor = look.ink; outlineAmbientShadowColor = look.ink
                 accessibilityPaneTitle = if (pin != null) "Shortcut menu" else "App menu"
-                addView(list, FrameLayout.LayoutParams(-1, -2))
+                // the frosted core scrolls its rows when the menu had to be capped (no room around the icon)
+                addView(ScrollView(act).apply {
+                    background = list.background; clipToOutline = true
+                    isVerticalScrollBarEnabled = false; overScrollMode = View.OVER_SCROLL_NEVER
+                    list.background = null; list.clipToOutline = false
+                    addView(list, FrameLayout.LayoutParams(-1, -2))
+                }, FrameLayout.LayoutParams(-1, -2))
             }
         }
 

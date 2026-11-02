@@ -4,6 +4,8 @@ import android.app.WallpaperColors
 import android.app.WallpaperManager
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 
 /** One curated look: every colour Home and its screens draw with. Colours are ARGB ints written as hex literals so
  *  this file's pure parts run in plain unit tests (ThemesTest checks every text colour against its ground). */
@@ -34,16 +36,17 @@ object Themes {
     val glacier = ThemeSpec("glacier", "Glacier", false,
         ground = c(0xFFE6EEF4), mesh = intArrayOf(c(0xFFFFFFFF), c(0xFFCFE3F2), c(0xFFDCE8F1)), breath = 0x22,
         glass = c(0x8CFFFFFF), glassEdge = c(0xF2FFFFFF), shell = c(0x47FFFFFF), shellEdge = c(0xB3FFFFFF), bar = c(0xD6F4F8FB),
-        ink = c(0xFF1D2B3A), ink2 = c(0xFF4E6072), ink3 = c(0xFF5E6D7B), accent = c(0xFF3FB6EC),
+        ink = c(0xFF1D2B3A), ink2 = c(0xFF4E6072), ink3 = c(0xFF566472), accent = c(0xFF3FB6EC),
         navy = c(0xFF1F2D44), onNavy = c(0xFFEEF4F9), chrome = intArrayOf(c(0xFF5B6F86), c(0xFF1F2D44), c(0xFF0E1726)), onChrome = c(0xFFEEF4F9),
-        // ok and warn a shade deeper than DESIGN.md's #2E7D62 / #A0661B: those were 4.2 and 3.9 to 1 on the ice
-        ok = c(0xFF2A7259), warn = c(0xFF8E5A17), bad = c(0xFFB23A3A), sheen = 1f, pair = "night")
+        // ok and warn a shade deeper than DESIGN.md's #2E7D62 / #A0661B: those were 4.2 and 3.9 to 1 on the ice; ink3,
+        // ok, warn and bad a touch deeper again so they hold 4.5 on the frost's cool corner (#CFE3F2), not only the ice
+        ok = c(0xFF296E57), warn = c(0xFF8A5818), bad = c(0xFFB0393A), sheen = 1f, pair = "night")
 
     // the dashboard's :root.dark (web/src/index.css)
     val night = ThemeSpec("night", "Night Glacier", true,
         ground = c(0xFF0A111C), mesh = intArrayOf(c(0xFF16233A), c(0xFF0E2A3D), c(0xFF121E30)), breath = 0x2A,
         glass = c(0x9922344B), glassEdge = c(0x1CFFFFFF), shell = c(0x08FFFFFF), shellEdge = c(0x17FFFFFF), bar = c(0xD60E1726),
-        ink = c(0xFFE4ECF4), ink2 = c(0xFFA9B8C8), ink3 = c(0xFF8496AA), accent = c(0xFF3FB6EC),
+        ink = c(0xFFE4ECF4), ink2 = c(0xFFA9B8C8), ink3 = c(0xFF8698AC), accent = c(0xFF3FB6EC),
         navy = c(0xFF9FDDF7), onNavy = c(0xFF0A111C), chrome = intArrayOf(c(0xFF3FB6EC), c(0xFF2672A2), c(0xFF1F4E78)), onChrome = c(0xFFF4FAFF),
         ok = c(0xFF4CC38A), warn = c(0xFFE0A458), bad = c(0xFFF07A7A), sheen = 0.22f, pair = "glacier")
 
@@ -67,7 +70,7 @@ object Themes {
     val moss = ThemeSpec("moss", "Moss", true,
         ground = c(0xFF0A1511), mesh = intArrayOf(c(0xFF16291F), c(0xFF0D2A21), c(0xFF11201A)), breath = 0x2A,
         glass = c(0x99183026), glassEdge = c(0x1CFFFFFF), shell = c(0x08FFFFFF), shellEdge = c(0x17FFFFFF), bar = c(0xD60C1A15),
-        ink = c(0xFFE3EFE8), ink2 = c(0xFFA7BEB2), ink3 = c(0xFF7F9A8C), accent = c(0xFF6FD3A6),
+        ink = c(0xFFE3EFE8), ink2 = c(0xFFA7BEB2), ink3 = c(0xFF839D8F), accent = c(0xFF6FD3A6),
         navy = c(0xFFB5EBD2), onNavy = c(0xFF0A1511), chrome = null, onChrome = c(0xFF0A1511),
         ok = c(0xFF62CF95), warn = c(0xFFE3AE5F), bad = c(0xFFF08A80), sheen = 0.22f, pair = "graphite")
 
@@ -75,7 +78,7 @@ object Themes {
     val ember = ThemeSpec("ember", "Ember", true,
         ground = c(0xFF141110), mesh = intArrayOf(c(0xFF2A211B), c(0xFF2B1C12), c(0xFF1E1915)), breath = 0x26,
         glass = c(0x99302823), glassEdge = c(0x1CFFFFFF), shell = c(0x08FFFFFF), shellEdge = c(0x17FFFFFF), bar = c(0xD617130F),
-        ink = c(0xFFF3ECE6), ink2 = c(0xFFC4B7AC), ink3 = c(0xFF9A8B7D), accent = c(0xFFF0A64A),
+        ink = c(0xFFF3ECE6), ink2 = c(0xFFC4B7AC), ink3 = c(0xFF9D8E81), accent = c(0xFFF0A64A),
         navy = c(0xFFF6C88A), onNavy = c(0xFF141110), chrome = null, onChrome = c(0xFF141110),
         ok = c(0xFF6CC79A), warn = c(0xFFF0B45E), bad = c(0xFFF2857A), sheen = 0.22f, pair = "graphite")
 
@@ -115,6 +118,50 @@ object Themes {
         return if (contrast(light, mid) >= contrast(t.ground, mid)) light else t.ground
     }
 
+    /** Every surface text sits on in this theme, opaque: the ground, the frost's light (each mesh stop and the
+     *  accent's breath), the glass over each of those, the settings bar. ThemesTest holds every text colour to 4.5:1
+     *  on all of them; on a photo, Look's halo puts the ground back behind the letters. */
+    fun grounds(t: ThemeSpec, accent: Int = t.accent): List<Int> {
+        val frost = listOf(t.ground) + t.mesh.toList() + over((accent and 0xFFFFFF) or (t.breath shl 24), t.ground)
+        return frost + frost.map { over(t.glass, it) } + over(t.bar, t.ground)
+    }
+
+    /** The accent as a word (a mode's name): the accent itself where it reads on every ground, else pulled toward the
+     *  ink until it does. Glacier on the ice is 2:1, right for a hairline, too faint for text. */
+    fun readable(t: ThemeSpec, accent: Int): Int {
+        val on = grounds(t, accent); val a = accent or (0xFF shl 24)
+        var k = 0f; var c = a
+        while (k < 1f && on.any { contrast(c, it) < 4.5 }) { k = minOf(1f, k + 0.05f); c = mix(a, t.ink, k) }
+        return c
+    }
+
+    /** The inks for words drawn straight on his photo or the phone wallpaper (Home's glance): this theme's or its
+     *  twin's, whichever ink reads better on what sits behind them. The wallpaper decides, not the theme. */
+    fun bare(t: ThemeSpec, backdrop: Int): ThemeSpec {
+        val twin = byId(t.pair)
+        return if (contrast(twin.ink, backdrop) > contrast(t.ink, backdrop)) twin else t
+    }
+
+    /** Every colour a needs card writes in (Panels): the inks, the states and the accent as a link. */
+    fun cardInks(t: ThemeSpec, accent: Int) = listOf(t.ink, t.ink2, t.ink3, t.navy, t.ok, t.warn, t.bad, readable(t, accent))
+
+    /** The light a needs card catches at its brightest (Panels' fill, white at 92 scaled by the theme's sheen). */
+    fun cardSheen(t: ThemeSpec) = ((92 * t.sheen).toInt().coerceIn(0, 255) shl 24) or 0xFFFFFF
+
+    /** The tint under a needs card over his photo or the phone wallpaper: the ground on dark themes, white on light,
+     *  just strong enough that every card ink holds 4.5:1 with plain white or plain black behind, sheen or not. */
+    fun cardTint(t: ThemeSpec, accent: Int): Int {
+        val rgb = if (t.dark) t.ground and 0xFFFFFF else 0xFFFFFF
+        val inks = cardInks(t, accent); val sheen = cardSheen(t)
+        for (a in (t.glass ushr 24)..255) {  // never clearer than the theme's own glass
+            val tint = (a shl 24) or rgb
+            val reads = extremes.all { b -> val s = over(tint, b); inks.all { contrast(it, s) >= 4.5 && contrast(it, over(sheen, s)) >= 4.5 } }
+            if (reads) return tint
+        }
+        return (0xFF shl 24) or rgb
+    }
+    val extremes = listOf(0xFF000000.toInt(), 0xFFFFFFFF.toInt())  // the worst wallpapers: plain black, plain white
+
     // ── colour maths (pure) ──
     fun mix(a: Int, b: Int, t: Float): Int {
         fun ch(s: Int) = (((a ushr s) and 255) + (((b ushr s) and 255) - ((a ushr s) and 255)) * t).toInt().coerceIn(0, 255)
@@ -133,6 +180,13 @@ object Themes {
         return 0.2126 * lin((c shr 16) and 255) + 0.7152 * lin((c shr 8) and 255) + 0.0722 * lin(c and 255)
     }
 
+    /** The sRGB grey with this relative luminance. */
+    fun grey(lum: Double): Int {
+        val l = lum.coerceIn(0.0, 1.0)
+        val v = Math.round(255 * (if (l <= 0.0031308) l * 12.92 else 1.055 * Math.pow(l, 1 / 2.4) - 0.055)).toInt().coerceIn(0, 255)
+        return (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+    }
+
     fun contrast(a: Int, b: Int): Double {
         val la = luminance(a); val lb = luminance(b)
         return (maxOf(la, lb) + 0.05) / (minOf(la, lb) + 0.05)
@@ -145,7 +199,7 @@ object Appearance {
     const val FROST = "frost"; const val PHOTO = "photo"; const val SYSTEM = "system"
     const val V = "ap_v"; const val THEME = "ap_theme"; const val ACCENT = "ap_accent"; const val FONT = "ap_font"
     const val WALL = "ap_wall"; const val BLUR = "ap_blur"; const val DIM = "ap_dim"; const val INK = "ap_ink"
-    const val PHOTO_DARK = "ap_photo_dark"; const val MATCH = "ap_match"
+    const val PHOTO_DARK = "ap_photo_dark"; const val PHOTO_LUM = "ap_photo_lum"; const val MATCH = "ap_match"
     const val THEMED_ICONS = "themed_icons"  // REDESIGN phase 2 contract: APPS draws monochrome icons when true
     const val PHOTO_FILE = "wallpaper.jpg"
     const val MIN_DIM = 10  // percent: even a calm photo gets a veil, so the ink always has something to sit on
@@ -170,6 +224,42 @@ object Appearance {
         } catch (_: Exception) { null }
         else -> null
     }
+
+    /** Alpha (0..255) of the veil Home lays over his photo or the phone wallpaper at rest (FrostView). */
+    fun dimA(c: Context) = prefs(c).getInt(DIM, 30).coerceIn(MIN_DIM, 90) * 255 / 100
+
+    /** His photo's average luminance: stored when he picked it; a photo picked before that is measured once here. */
+    fun photoLum(c: Context): Double? {
+        val p = prefs(c)
+        if (p.contains(PHOTO_LUM)) return p.getFloat(PHOTO_LUM, 0f).toDouble()
+        val f = Wallpaper.file(c)
+        if (!f.exists()) return null
+        val b = try { BitmapFactory.decodeFile(f.path, BitmapFactory.Options().apply { inSampleSize = 32 }) } catch (_: Throwable) { null } ?: return null
+        return lum(b).also { p.edit().putFloat(PHOTO_LUM, it.toFloat()).apply() }  // plain edit: no version bump, no rebuild
+    }
+
+    // shortcut: the whole picture's average, not just the strip behind the glance; measure that strip if a photo fools it
+    fun lum(b: Bitmap): Double {
+        val tiny = Bitmap.createScaledBitmap(b, 16, 16, true)
+        var sum = 0.0
+        for (y in 0 until 16) for (x in 0 until 16) sum += Themes.luminance(tiny.getPixel(x, y))
+        return sum / 256
+    }
+
+    /** What sits behind Home's words: the wallpaper (his photo's average grey; the phone's as plain white or black by
+     *  Android's dark-text hint) under the resting veil. null = the frost, or not known. */
+    fun backdrop(c: Context, t: ThemeSpec): Int? {
+        val wall = prefs(c).getString(WALL, FROST) ?: FROST
+        val sample = when (wall) {
+            PHOTO -> photoLum(c)?.let { Themes.grey(it) } ?: wallDark(c, wall)?.let { if (it) Themes.extremes[0] else Themes.extremes[1] }
+            SYSTEM -> wallDark(c, wall)?.let { if (it) Themes.extremes[0] else Themes.extremes[1] }
+            else -> null
+        } ?: return null
+        return Themes.over((t.ground and 0xFFFFFF) or (dimA(c) shl 24), sample)
+    }
+
+    /** The inks for words straight on the wallpaper: the theme's, or its twin's when the wallpaper wants the other. */
+    fun bare(c: Context, t: ThemeSpec) = backdrop(c, t)?.let { Themes.bare(t, it) } ?: t
 
     fun theme(c: Context): ThemeSpec {
         val p = prefs(c); val wall = p.getString(WALL, FROST) ?: FROST

@@ -10,6 +10,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from harness import PROJECT_ROOT, Harness  # noqa: E402
 import json  # noqa: E402
+import os  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 
@@ -1139,6 +1140,40 @@ class TierAndPlanGoneTest(unittest.TestCase):
             self.assertEqual(server.bg_agent("check"), server.BACKGROUND_DEFAULT)
 
 
+class ServerLogTests(unittest.TestCase):
+    def test_a_stale_server_log_is_skipped_a_fresh_audit_log_is_read(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "audit").mkdir()
+        (tmp / "data").mkdir()
+        (tmp / "audit" / "audit.log").write_text("fresh audit line\n", encoding="utf-8")
+        log = tmp / "data" / "server.log"
+        log.write_text("old server line\n", encoding="utf-8")
+        two_days_ago = time.time() - 2 * 86400
+        os.utime(log, (two_days_ago, two_days_ago))
+        with mock.patch.object(server, "BASE_DIR", tmp), mock.patch.object(server, "_tickets", return_value=[]):
+            out = server._os_evidence(10, 10)
+        self.assertIn("fresh audit line", out)
+        self.assertNotIn("old server line", out)
+        self.assertIn("(skipped, stale: last written 48h ago)", out)
+        for header in ("--- audit.log ---", "--- server.log ---", "--- tickets ---"):
+            self.assertIn(header, out)
+
+    def test_server_log_rotates_at_the_limit_and_appends_below_it(self):
+        log = Path(tempfile.mkdtemp()) / "server.log"
+        backup = log.with_name("server.log.1")
+        log.write_text("small\n", encoding="utf-8")
+        with server._open_server_log(log, 100) as f:
+            f.write("more\n")
+        self.assertEqual(log.read_text(encoding="utf-8"), "small\nmore\n")  # below the limit: appended, no backup
+        self.assertFalse(backup.exists())
+        backup.write_text("older backup\n", encoding="utf-8")
+        log.write_text("x" * 100, encoding="utf-8")
+        with server._open_server_log(log, 100) as f:
+            f.write("new run\n")
+        self.assertEqual(backup.read_text(encoding="utf-8"), "x" * 100)  # the old backup was replaced
+        self.assertEqual(log.read_text(encoding="utf-8"), "new run\n")
+
+
 class MeetingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1210,7 +1245,7 @@ class CrewBriefTests(unittest.TestCase):
                               "helper": None, "action": "linkedin_post", "schedule": "", "approve_first": 3})
             crews.update(c["id"], lambda x: x.update(next_brief={"topic": "Claude Ultra", "image": str(img)}))
             seen = []
-            rid = crews.run(c["id"], lambda a, p, m, e: seen.append(p) or "Post text", server._crew_action)
+            rid = crews.run(c["id"], lambda a, p, m, e: seen.append(p) or "<post>Post text</post>", server._crew_action)
             for _ in range(50):
                 r = next(x for x in crews.get(c["id"])["runs"] if x["id"] == rid)
                 if r["status"] != "running":
@@ -1240,3 +1275,109 @@ class IndeedAddTests(unittest.TestCase):
             with self.assertRaises(server.HTTPException):
                 server.jobs_add({"url": "Generative AI Editor"})
         self.assertEqual(seen, ["https://ph.indeed.com/viewjob?jk=0123456789abcdef"])
+
+
+class PhoneOpenTests(unittest.TestCase):
+    def test_device_and_phone_opens_are_kept_and_checked(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(server, "JHARVIS_MSGS", Path(d) / "m.json"):
+            asked = server.jharvis_post(server.JharvisMessage(text="open spotify", client="phone"))
+            reply = server.jharvis_post(server.JharvisMessage(text="Opening", role="jharvis", open=[
+                "app:Spotify", "https://www.youtube.com/results?search_query=calm+baby", "intent:evil", "http://x"]))
+            more = server.jharvis_post(server.JharvisMessage(text="Sending", role="jharvis", open=[
+                "sms:Mom?body=I%27m+late", "call:Mom", "spotify:search:lofi", "file:///sdcard/x", "content://contacts"]))
+        self.assertEqual(asked["client"], "phone")
+        self.assertEqual(reply["open"], ["app:Spotify", "https://www.youtube.com/results?search_query=calm+baby"])
+        self.assertEqual(more["open"], ["sms:Mom?body=I%27m+late", "call:Mom", "spotify:search:lofi"])
+
+    def test_phone_app_list_is_stored_clean(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(server, "JHARVIS_PHONE_APPS", Path(d) / "a.json"):
+            server.jharvis_phone_apps_set(server.PhoneApps(apps=["YouTube", " ", "Camera", "YouTube"]))
+            self.assertEqual(server.jharvis_phone_apps()["apps"], ["Camera", "YouTube"])
+
+
+class MeetingFailedWorkerTests(unittest.TestCase):
+    """TKT-0020: a worker that fails in an automatic meeting sits out its remaining rounds. Synthetic data only;
+    persistence and logging are mocked, so no harness and no personal files."""
+    TIMEOUT = "⏱ agy timed out after 10 minutes."
+
+    def setUp(self):
+        for name in ("save_session", "append_audit", "log_error"):
+            self.enterContext(mock.patch.object(server, name))
+        self.enterContext(mock.patch.object(server, "claude_guard", return_value=None))
+        self.enterContext(mock.patch.dict(server._resting, {}, clear=True))
+        self.cli = self.enterContext(mock.patch.object(server, "run_cli", return_value=(0, json.dumps({"result": "Do X.", "usage": {}}), "")))
+        self.calls = []
+
+    def _sess(self, agents, meeting=True, rounds=2):
+        return {"id": "tkt20", "title": "t", "agents": agents, "rounds": rounds, "round": 0, "judge": True, "working": [],
+                "status": "running", "meeting": meeting, "messages": [{"role": "user", "agent": None, "round": 0, "content": "q"}]}
+
+    def _ex(self, fail=("agy",)):
+        def ex(a, p, meta=None, skip=(), **kw):
+            self.calls.append((a, tuple(skip)))
+            return self.TIMEOUT if a in fail else f"{a} idea"  # no DONE: both rounds run
+        return ex
+
+    def test_agy_timeout_round_one_sits_out_round_two(self):
+        sess = self._sess(["agy", "codex", "opencode"])
+        with mock.patch.object(server, "execute_agent", side_effect=self._ex()):
+            server.run_session(sess)
+        self.assertEqual([a for a, _ in self.calls].count("agy"), 1)
+        agents = [m for m in sess["messages"] if m["role"] == "agent"]
+        self.assertEqual([m["agent"] for m in agents if m.get("unverified")], ["agy"])
+        for r in (1, 2):
+            self.assertEqual(sorted(m["agent"] for m in agents if m["round"] == r and not m.get("unverified")), ["codex", "opencode"])
+        self.assertTrue(all("agy" in skip for a, skip in self.calls[3:]))  # round two: no fallback can call it either
+        self.assertEqual(sess["failed_workers"], ["agy"])
+        self.assertIn("No usable answer from: agy", sess["messages"][-1]["content"])
+        self.assertNotIn(self.TIMEOUT, self.cli.call_args.kwargs["answer"])
+
+    def test_note_kept_when_verdict_unavailable(self):
+        sess = self._sess(["agy", "codex", "opencode"])
+        self.cli.side_effect = RuntimeError("limit")
+        with mock.patch.object(server, "execute_agent", side_effect=self._ex()), \
+             mock.patch.object(server, "bg_agent", return_value="codex"):
+            server.run_session(sess)
+        self.assertIn("No usable answer from: agy", sess["messages"][-1]["content"])
+
+    def test_all_workers_failed_stops_safely(self):
+        sess = self._sess(["agy", "codex"])
+        with mock.patch.object(server, "execute_agent", side_effect=self._ex(fail=("agy", "codex"))):
+            server.run_session(sess)
+        self.assertEqual(len(self.calls), 2)  # no round two
+        self.assertEqual((sess["round"], sess["status"]), (1, "idle"))
+        self.assertIn("No usable answer from: agy, codex", sess["messages"][-1]["content"])
+
+    def test_exclusion_survives_a_pause(self):
+        sess = self._sess(["agy", "codex"])
+        def ex(a, p, meta=None, skip=(), **kw):
+            self.calls.append((a, tuple(skip)))
+            return self.TIMEOUT if a == "agy" else "QUESTION: which one?"
+        with mock.patch.object(server, "execute_agent", side_effect=ex):
+            server.run_session(sess)
+            self.assertEqual(sess["status"], "awaiting_user")
+            sess["messages"].append({"role": "user", "agent": None, "round": 1, "content": "the first"})
+            sess.update(run_rounds=1, questions=[])
+            server.run_session(sess)
+        self.assertEqual([a for a, _ in self.calls], ["agy", "codex", "codex"])
+
+    def test_fallback_worker_that_failed_is_excluded(self):
+        sess = self._sess(["hermes", "codex"])
+        def ex(a, p, meta=None, skip=(), **kw):
+            self.calls.append((a, tuple(skip)))
+            if a == "hermes":
+                meta["actual_agent"] = "opencode"
+                return "opencode failed: boom"
+            return "codex idea"
+        with mock.patch.object(server, "execute_agent", side_effect=ex):
+            server.run_session(sess)
+        self.assertEqual(sess["failed_workers"], ["opencode"])
+        self.assertIn(("hermes", ("opencode",)), self.calls)  # round two: the failed fallback can't answer again
+
+    def test_manual_session_unchanged(self):
+        sess = self._sess(["agy", "codex"], meeting=False)
+        with mock.patch.object(server, "execute_agent", side_effect=self._ex()):
+            server.run_session(sess)
+        self.assertEqual([a for a, _ in self.calls].count("agy"), 2)
+        self.assertNotIn("failed_workers", sess)
+        self.assertTrue(all(skip == () for _, skip in self.calls))

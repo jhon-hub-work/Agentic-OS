@@ -13,8 +13,11 @@ import android.provider.Settings
 import android.text.format.DateUtils
 import com.jhon.agenticos.core.Link
 import com.jhon.agenticos.core.Mode
+import com.jhon.agenticos.core.Refused
+import com.jhon.agenticos.core.osHttp
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
 import java.math.BigDecimal
 import java.math.MathContext
 import java.text.Normalizer
@@ -355,11 +358,30 @@ object SmartSearch {
 
     // ── Ask Jharvis ─────────────────────────────────────────────────────────────────────────────────
 
+    // review 2 Nov: wider than the PC's yes, so no yes-like word ("ok", "sige", "do it") ever waits in the queue
+    private val yes = Regex("""^\W*((hey\s+)?jh?arvis\W+)?(yes|yeah|yep|yup|ok(ay)?|sure|sige|oo|do it|send it|approved?|go ahead|go(?=\W*$))\b""",
+        RegexOption.IGNORE_CASE)
+
+    /** A yes approves whatever card is waiting when it lands, so it's never queued: one typed while the PC is away
+     *  could approve a different card that shows up later. */
+    fun isYes(q: String) = yes.containsMatchIn(q)
+
+    const val NOT_REACHED = "Couldn't reach Jharvis, so your yes wasn't sent. Say it again."
+
+    /** A yes that didn't get through. Its message is the line to show him. */
+    class NotReached : IOException(NOT_REACHED)
+
     /** Queue the question for Jharvis (15 min: a typed question hours later is noise) and try to send it now.
-     *  Returns true if the PC answered in the last 60 s, so the dashboard can show the reply. Call off the main thread. */
+     *  Returns true if the PC answered in the last 60 s, so the dashboard can show the reply. A yes goes now or not at
+     *  all (NotReached). Call off the main thread. */
     fun ask(q: String): Boolean {
-        Link.queue.add("/api/jharvis/messages",
-            JSONObject().put("role", "owner").put("text", q.trim().take(8000)).put("client", "phone").toString(), 15 * 60_000L)
+        val body = JSONObject().put("role", "owner").put("text", q.trim().take(8000)).put("client", "phone").toString()
+        if (isYes(q)) {
+            try { osHttp("/api/jharvis/messages", "POST", "application/json", body.toByteArray(), 15_000) }
+            catch (e: IOException) { if (e is Refused) throw e; throw NotReached() }
+            return true
+        }
+        Link.queue.add("/api/jharvis/messages", body, 15 * 60_000L)
         try { Link.queue.flush() } catch (_: Exception) {}
         return System.currentTimeMillis() - Link.lastBeat("pc") < 60_000L
     }

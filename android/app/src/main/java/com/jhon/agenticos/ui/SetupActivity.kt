@@ -28,6 +28,7 @@ import android.widget.Switch
 import android.widget.TextView
 import com.jhon.agenticos.R
 import com.jhon.agenticos.core.Backup
+import com.jhon.agenticos.core.Crash
 import com.jhon.agenticos.core.Link
 import org.json.JSONArray
 import org.json.JSONObject
@@ -97,6 +98,8 @@ class SetupActivity : Activity() {
         section("Home screen", "Home button opens Agentic OS. One UI Home stays installed.",
             row("Default home app", R.drawable.ic_set_home, "#2F7FD0", { word(Checks.isHome(this)) }) {
                 startActivityForResult(roles.createRequestRoleIntent(RoleManager.ROLE_HOME), ROLE) },
+            row("App layout", R.drawable.ic_set_layout, "#3D7BD9", { Layouts.name(Layouts.current(this)) }) {
+                LayoutPicker.show(it, look, Layouts.current(it)) { id -> Layouts.set(this, id); refresh.forEach { r -> r() } } },
             row("Hidden and locked apps", R.drawable.ic_set_hidden, "#5B6F86", {
                 (HiddenApps.all(this) + prefs.getStringSet("locked_apps", null).orEmpty()).size.let { if (it == 0) "None" else "$it" } }) {
                 it.startActivity(Intent(it, HiddenAppsActivity::class.java)) })
@@ -267,7 +270,7 @@ class SetupActivity : Activity() {
 
     /** exits.log (STABILITY writes it in Link.dir): the last few non-blank lines. */
     private fun recentProblems(): List<String> =
-        File(Link.dir, "exits.log").takeIf { it.isFile }?.readLines()?.map { it.trim() }?.filter { it.isNotEmpty() }?.takeLast(3).orEmpty()
+        File(Link.dir, "exits.log").takeIf { it.isFile }?.readLines()?.map { it.trim() }?.filter { Crash.isProblem(it) }?.takeLast(3).orEmpty()
 
     // ── export and import: one JSON file through Android's file picker (no permission); core/Backup.kt is the format ──
 

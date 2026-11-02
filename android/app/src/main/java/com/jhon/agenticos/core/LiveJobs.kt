@@ -98,6 +98,9 @@ object LiveJobs {
     /** The short chip in the status bar and Now Bar: "5/8". Nothing when there's no real count yet. */
     fun chip(i: Item): String? = if (i.step > 0 && i.steps > 0) "${i.step}/${i.steps}" else null
 
+    /** While quiet, how a job ended goes into his summary instead of a notification. Null: show it as usual. */
+    fun held(i: Item, quiet: Boolean): String? = if (quiet && i.state != State.GONE) "${i.title}: ${i.label}" else null
+
     fun interval(anyLive: Boolean, pcAnswered: Boolean) = when { !pcAnswered -> 120_000L; anyLive -> 20_000L; else -> 60_000L }
 
     // ── the poll thread ─────────────────────────────────────────────────────────────────────────────
@@ -197,7 +200,8 @@ object LiveJobs {
 
     /** The pill becomes a normal notification that says how it ended (same id, so it replaces the pill). */
     private fun end(c: Context, nm: NotificationManager, i: Item) {
-        if (i.state == State.GONE || !allowed(c)) { nm.cancel(nid(i.id)); return }
+        val keep = held(i, Quiet.on())
+        if (i.state == State.GONE || (keep != null && Quiet.hold("notify", keep)) || !allowed(c)) { nm.cancel(nid(i.id)); return }
         val n = Notification.Builder(c, CHANNEL).setSmallIcon(R.drawable.ic_fg)
             .setContentTitle(i.title).setContentText(i.label).setStyle(Notification.BigTextStyle().bigText(i.label))
             .setAutoCancel(true).setContentIntent(open(c, i)).build()
