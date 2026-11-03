@@ -15,7 +15,7 @@ class AppLayoutTest {
 
     @Test fun everyLayoutHasItsOwnPlainName() {
         val names = Layouts.IDS.map { Layouts.name(it) }
-        assertEquals(listOf("Orbit", "Smart groups", "Honeycomb", "Jharvis picks", "Sphere"), names)
+        assertEquals(listOf("Orbit", "Smart groups", "Honeycomb", "Jharvis picks", "Sphere", "Typographic Matrix", "Fluid Spline", "Mercury Flow", "Horizon Core"), names)
         for (id in Layouts.IDS) {
             val about = Layouts.about(id)
             assertTrue(about.isNotBlank())

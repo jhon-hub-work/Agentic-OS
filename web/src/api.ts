@@ -2,6 +2,8 @@ export type AgentName = string  // the 4 built in + any added on Agents & tools 
 export type Agent = { name: AgentName; status: 'online' | 'offline' }
 export type CostEntry = { timestamp: string; agent: string; tokens: number; cost: number; model: string }
 export type AuditEntry = { id?: string; action: string; timestamp: string; agent?: string; skill?: string; msg_preview?: string; output_preview?: string; thread?: string; hops?: number }
+/** One row of Jharvis's own audit log (GET /api/jharvis/audit; Jhon, 3 Nov). at: epoch seconds. */
+export type JharvisAuditRow = { at: number; surface: string; who: string; tool: string; args: string; status: 'ran' | 'denied' | 'failed' | 'stopped'; how: string; result: string }
 export type CrewRole = { agent: string; model?: string; effort?: string }
 export type CrewRun = { id: string; at: string; status: 'running' | 'awaiting_approval' | 'approved' | 'posting' | 'posted' | 'denied' | 'failed'; step?: string; advice?: string; help?: string; output?: string; error?: string; slides?: number; post?: { caption: string }; auto?: boolean }
 export type Crew = { id: string; name: string; task: string; skills: string[]; agent: CrewRole; advisor: CrewRole | null; helper: CrewRole | null; action: string; schedule: string; approve_first: number; approved: number; runs: CrewRun[]; ig_handle?: string }
@@ -58,6 +60,7 @@ export const api = {
   status: () => req<{ agents: Agent[]; skills_count: number }>('/api/status'),
   cost: () => req<{ entries: CostEntry[] }>('/api/cost'),
   audit: (limit = 60) => req<{ entries: AuditEntry[] }>(`/api/audit?limit=${limit}`),
+  jharvisAudit: (day = '', status = '') => req<{ rows: JharvisAuditRow[]; off: boolean }>(`/api/jharvis/audit?day=${day}&status=${status}`),
   skills: () => req<Skill[]>('/api/skills'),
   crews: () => req<{ crews: Crew[]; actions: Record<string, string> }>('/api/crews'),
   createCrew: (c: Omit<Crew, 'id' | 'approved' | 'runs'>) => req<Crew>('/api/crews', { method: 'POST', body: JSON.stringify(c) }),

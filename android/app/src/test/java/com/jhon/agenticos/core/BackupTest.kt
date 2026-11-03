@@ -9,7 +9,8 @@ import org.junit.Test
 
 class BackupTest {
     private val prefs = mapOf<String, Any>(
-        "dock_0" to "com.whatsapp", "dock_night_1" to "com.spotify.music",
+        "dock0" to "com.whatsapp", "dock2" to "",  // "" = a spot he removed: it must stay removed
+        "dock_night_1" to "com.spotify.music",     // an old per-mode dock: must not travel
         "hidden_apps" to setOf("com.a", "com.b"), "locked_apps" to setOf("com.bank"),
         "pins" to """[{"pkg":"com.x","id":"s1","label":"New chat"}]""",
         "ap_theme" to "graphite", "ap_accent" to 0xFF22A39A.toInt(), "ap_blur" to 16, "themed_icons" to true,
@@ -27,6 +28,7 @@ class BackupTest {
     @Test fun everyPortableValueComesBackWithItsType() {
         val s = roundTrip()
         assertEquals(prefs.filterKeys(Backup::portable), s.prefs)
+        assertEquals("", s.prefs["dock2"])
         assertTrue(s.prefs["ap_accent"] is Int); assertTrue(s.prefs["big"] is Long); assertTrue(s.prefs["glance_lat"] is Float)
         assertEquals(launches, s.launches)
         assertEquals(listOf("com.w/.Clock", "com.v/.Big"), s.widgets)
@@ -35,7 +37,7 @@ class BackupTest {
 
     @Test fun installBoundKeysAndTheCookieNeverTravel() {
         val s = roundTrip()
-        for (k in listOf("widgets", "ap_v", "setup_done", "setup_vpn", "chat_access_asked", "restore_widgets"))
+        for (k in listOf("widgets", "ap_v", "setup_done", "setup_vpn", "chat_access_asked", "restore_widgets", "dock_night_1"))
             assertFalse(k, s.prefs.containsKey(k))
         assertEquals(setOf("mode.json", "shift.json"), s.files.keys)
         assertEquals("NIGHT", JSONObject(s.files["mode.json"]!!).getString("manual"))
@@ -51,7 +53,7 @@ class BackupTest {
 
     @Test fun dropsWrongTypesUnknownFilesAndJunkWidgets() {
         val text = """{"kind":"agentic-os-setup","version":1,
-            "prefs":{"b":{"wake":"yes","ok":true},"i":{"n":"7"},"ss":{"hidden_apps":["a",3,"b"]},"s":{"ap_v":"9"}},
+            "prefs":{"b":{"wake":"yes","ok":true},"i":{"n":"7"},"ss":{"hidden_apps":["a",3,"b"]},"s":{"ap_v":"9","dock_driving_0":"com.old"}},
             "widgets":["com.a/.W", 5, "nonsense"],
             "files":{"mode.json":{"manual":"OFF"},"../pair_cookie":{"x":1},"shift.json":"text"}}"""
         val s = Backup.decode(text)

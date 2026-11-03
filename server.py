@@ -773,7 +773,7 @@ def run_scheduled(job: dict, trigger: str):
     status, reason = "completed", ""
     try:
         if kind == "jobs":
-            out = json.dumps(run_job_pipeline())
+            out = json.dumps(run_job_pipeline(wait=True))
         elif kind == "upwork":
             out = json.dumps(run_upwork_invites())
         elif kind == "agent":  # a scheduled Claude job keeps Claude only while the guard allows it
@@ -811,9 +811,10 @@ def job_agent(agent: str, prompt: str) -> str:
         raise RuntimeError(f"{why}: drafting waits for the next run")
     return execute_agent(agent, prompt)
 
-def run_job_pipeline() -> dict:
+def run_job_pipeline(wait: bool = False) -> dict:
+    """wait=True (the daily schedule) queues behind a running invite check instead of skipping the day (TKT-0022)."""
     from jobs import pipeline
-    if not _jobs_lock.acquire(blocking=False):
+    if not _jobs_lock.acquire(blocking=wait):
         return {"skipped": "a job run is already going"}
     try:
         stats = pipeline.run(job_agent, log=lambda m: print(f"[jobs] {m}"),
@@ -1161,9 +1162,12 @@ class JharvisApprovalAsk(BaseModel):
     why: str = ""
     if_no: str = ""
     details: str = ""
+    # Jhon, 3 Nov: Jharvis says the exact command may be always allowed (its own floor checked it); shows the third button
+    grantable: bool = False
 
 class JharvisApprovalDecision(BaseModel):
     approve: bool
+    always: bool = False  # "Always allow": counts only on a grantable card, and only with approve
 
 # Fallback when an ask comes without plain words (an old card, or Jharvis's model failed): what it does, no tech words.
 PLAIN_WHAT = {
@@ -1228,7 +1232,7 @@ def _approvals() -> list:
 @app.post("/api/jharvis/approvals")
 def jharvis_approval_ask(a: JharvisApprovalAsk):
     item = plain_ask({"id": uuid.uuid4().hex[:10], "tool": a.tool[:80], "args": a.args, "status": "pending", "asked": get_timestamp(),
-                      "what": a.what, "why": a.why, "if_no": a.if_no, "details": a.details})
+                      "what": a.what, "why": a.why, "if_no": a.if_no, "details": a.details, "grantable": a.grantable})
     with _msgs_lock:
         write_atomic(JHARVIS_APPROVALS, json.dumps((_approvals() + [item])[-50:], indent=2))
     return item
@@ -1254,9 +1258,12 @@ def jharvis_approval_decide(aid: str, d: JharvisApprovalDecision):
             raise HTTPException(404, "No such request")
         if a["status"] != "pending":
             raise HTTPException(409, f"Already {a['status']}")
-        a.update(status="approved" if d.approve else "denied", decided=get_timestamp())
+        a.update(status="approved" if d.approve else "denied", decided=get_timestamp(),
+                 always=bool(d.always and d.approve and a.get("grantable")))
         write_atomic(JHARVIS_APPROVALS, json.dumps(items, indent=2))
-    append_audit({"action": "jharvis_approval", "agent": "jharvis", "msg_preview": f"{a['status']}: {a['tool']}"})
+    # the tool's name only, never the command or its text (it may quote a chat)
+    append_audit({"action": "jharvis_approval", "agent": "jharvis",
+                  "msg_preview": f"{a['status']}{' (always)' if a['always'] else ''}: {a['tool']}"})
     return a
 
 @app.post("/api/jharvis/approvals/{aid}/expire")
@@ -1547,7 +1554,13 @@ def _quiet_load() -> dict:
 
 
 def _quiet_view(q: dict) -> dict:
-    return {"on": q["on"], "since": q["since"], "by": q["by"], "held": len(q["items"]), "summary": q["summary"]}
+    # Jhon, 3 Nov ("Ask again next time"): while Jharvis has a missed card parked, the phone is told "waiting_unlock" so
+    # it reports his next unlock (it only does that then); "unlocked" is when it last did
+    want = bool(q.get("want_unlock")) and not q["on"] and q["summary"] == "none"
+    return {"on": q["on"], "since": q["since"], "by": q["by"], "held": len(q["items"]),
+            "summary": "waiting_unlock" if want else q["summary"],
+            **({"want_unlock": True} if q.get("want_unlock") else {}),
+            **({"unlocked": q["unlocked"]} if q.get("unlocked") else {})}
 
 
 def quiet_hold(kind: str, text: str, only_if_on: bool = True) -> Optional[dict]:
@@ -1608,7 +1621,19 @@ def quiet_unlocked():
         q = _quiet_load()
         if q["summary"] == "waiting_unlock":
             q["summary"] = "due"
-            write_atomic(QUIET_FILE, json.dumps(q))
+        q.pop("want_unlock", None)
+        q["unlocked"] = get_timestamp()
+        write_atomic(QUIET_FILE, json.dumps(q))
+    return _quiet_view(q)
+
+
+@app.post("/api/jharvis/quiet/want-unlock")
+def quiet_want_unlock():
+    """Jharvis parked a card he missed: report his next phone unlock (cleared by that unlock)."""
+    with _quiet_lock:
+        q = _quiet_load()
+        q["want_unlock"] = True
+        write_atomic(QUIET_FILE, json.dumps(q))
     return _quiet_view(q)
 
 
@@ -6063,6 +6088,17 @@ def jharvis_ui(method: str, path: str, body: Optional[dict] = None) -> dict:
                                           "X-Jharvis-Token": JHARVIS_UI_TOKEN.read_text().strip()})
     with urllib.request.urlopen(req, timeout=2) as r:
         return json.loads(r.read())
+
+@app.get("/api/jharvis/audit")
+def jharvis_audit(day: str = Query("", pattern=r"^(|today|yesterday|\d{4}-\d\d-\d\d)$"),
+                  status: str = Query("", pattern=r"^(|ran|denied|failed|stopped)$")):
+    """Jhon, 3 Nov ("Ask + dashboard page"): every tool call Jharvis made, from his own audit log (cleaned of
+    secrets and clinic text when written), read through his control UI like his live asks. off: he isn't running."""
+    try:
+        q = "&".join(f"{k}={v}" for k, v in (("day", day), ("status", status)) if v)
+        return {"rows": jharvis_ui("GET", "/api/audit" + (f"?{q}" if q else ""))["rows"], "off": False}
+    except (OSError, ValueError, KeyError):
+        return {"rows": [], "off": True}
 
 def _lab_overridable(r: dict) -> bool:
     """Same test as skill_lab_install_anyway: only a scanner block can be overruled."""

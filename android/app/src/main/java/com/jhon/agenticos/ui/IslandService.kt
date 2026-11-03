@@ -1,6 +1,7 @@
 package com.jhon.agenticos.ui
 
 import android.accessibilityservice.AccessibilityService
+import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -29,8 +30,8 @@ import com.jhon.agenticos.core.Snooze
  *  what's playing, from MediaSessionManager, which trusts us because ChatListener is our own enabled listener;
  *  charging, from the system. Nothing is sent anywhere; the only thing stored is which apps he muted, and until when
  *  (Link.dir/snooze.json). It also performs Home's global actions (open the shade, lock the phone), sent as the in-app
- *  broadcast com.jhon.agenticos.GLOBAL while the service is connected. Every entry point is guarded: a bug logs, it
- *  never crashes :island. */
+ *  broadcast com.jhon.agenticos.GLOBAL while the service is connected. While the phone
+ *  is locked the island pops no alerts. Every entry point is guarded: a bug logs, it never crashes :island. */
 class IslandService : AccessibilityService() {
     private var island: Island? = null
     private var controller: MediaController? = null
@@ -45,6 +46,15 @@ class IslandService : AccessibilityService() {
     private val main by lazy { Handler(mainLooper) }
 
     private val notes = receiver { note(it) }
+    private val keyguard by lazy { getSystemService(KeyguardManager::class.java) }
+    // screen on/off and unlock: the island takes no alerts while the phone is locked (privacy)
+    private val screen = receiver { i ->
+        when (i.action) {
+            Intent.ACTION_SCREEN_OFF -> island?.locked(true)  // the keyguard comes back with the screen off
+            Intent.ACTION_USER_PRESENT -> island?.locked(false)
+            else -> island?.locked(keyguard?.isKeyguardLocked == true)
+        }
+    }
     private val power = receiver {
         island?.charging(getSystemService(BatteryManager::class.java)?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: return@receiver)
     }
@@ -73,6 +83,10 @@ class IslandService : AccessibilityService() {
         registerReceiver(notes, IntentFilter(ISLAND_NOTE), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(global, IntentFilter(GLOBAL), Context.RECEIVER_NOT_EXPORTED)
         registerReceiver(power, IntentFilter(Intent.ACTION_POWER_CONNECTED))
+        registerReceiver(screen, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT)
+        })
+        island?.locked(keyguard?.isKeyguardLocked == true)
         // refused until notification access is on for ChatListener: the island then simply shows no music
         runCatching { sessions.addOnActiveSessionsChangedListener(sessionsChanged, listener) }
         follow(active())
@@ -91,7 +105,7 @@ class IslandService : AccessibilityService() {
     }
 
     private fun teardown() {
-        listOf(notes, global, power).forEach { r -> runCatching { unregisterReceiver(r) } }  // throws when not registered
+        listOf(notes, global, power, screen).forEach { r -> runCatching { unregisterReceiver(r) } }  // throws when not registered
         runCatching { sessions.removeOnActiveSessionsChangedListener(sessionsChanged) }
         runCatching { controller?.unregisterCallback(player) }; controller = null; playing = null
         island?.detach(); island = null
@@ -113,6 +127,7 @@ class IslandService : AccessibilityService() {
     private fun note(i: Intent) {
         val pkg = i.getStringExtra("pkg") ?: return
         if (pkg == "android" || pkg.startsWith("com.android.systemui")) return  // Android's own housekeeping
+        if (keyguard?.isKeyguardLocked == true) { island?.locked(true); return }  // locked with the screen on (Lockdown): no broadcast says so
         if (Snooze.muted(snoozed, pkg, System.currentTimeMillis())) return  // he muted it from the island
         val key = i.getStringExtra("key").orEmpty()
         val now = SystemClock.uptimeMillis()

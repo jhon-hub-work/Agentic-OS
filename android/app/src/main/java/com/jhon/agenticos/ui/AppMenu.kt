@@ -41,7 +41,7 @@ import android.window.OnBackInvokedDispatcher
 import com.jhon.agenticos.R
 
 /** Press and hold an app: the icon lifts out, the window blurs back, and a frosted menu grows out of the icon with
- *  the app's latest notifications, its shortcuts, Add to dock, Move to group (Smart groups layout), Hide app, Lock app,
+ *  the app's latest notifications, its shortcuts, Add to dock (from the dock itself: Change app, Remove from dock), Move to group (Smart groups layout), Hide app, Lock app,
  *  App info and Delete app. Call from
  *  any long-press in any UI Activity: `AppMenu.show(iconView, key, look, actions)`, key = an app key (a plain package
  *  works). Pass the icon view (what gets lifted is a snapshot of it). What the menu lists is read on the loader
@@ -50,21 +50,27 @@ object AppMenu {
     interface Actions {
         fun addToDock(pkg: String)   // home picks the slot
         fun changed()                // hidden/unhidden or uninstalled: reload lists
+        fun changeDock(slot: Int) {}      // only Home's dock opens a menu with a slot
+        fun removeFromDock(slot: Int) {}
     }
 
     private var current: Menu? = null  // one menu at a time
     val isOpen get() = current != null  // Sphere holds its idle spin while a menu is up
     private var asking = 0             // a newer long-press wins over a menu still being read
 
-    fun show(anchor: View, pkg: String, look: Look, actions: Actions) = open(anchor, pkg, look, actions, null, null)
+    /** dockSlot >= 0: held on that dock spot, so the menu offers Change app and Remove from dock instead of Add. */
+    fun show(anchor: View, pkg: String, look: Look, actions: Actions, dockSlot: Int = -1) = open(anchor, pkg, look, actions, null, null, dockSlot)
 
     /** Home pressed or left: the open menu goes at once, and one still being read never opens. */
     fun dismiss() { asking++; current?.dismissNow() }
 
+    /** The shortcuts the menu would list (Typographic Matrix shows them under a framed name). Off the main thread: IPC. */
+    internal fun shortcuts(la: LauncherApps?, pkg: String, user: UserHandle) = Data.shortcuts(la, pkg, user)
+
     /** A pinned shortcut's menu (search): Remove shortcut. `removed` runs once it's gone from the list. */
     fun showPin(anchor: View, pin: SmartSearch.Pin, look: Look, removed: () -> Unit) = open(anchor, pin.pkg, look, null, pin, removed)
 
-    private fun open(anchor: View, key: String, look: Look, actions: Actions?, pin: SmartSearch.Pin?, removed: (() -> Unit)?) {
+    private fun open(anchor: View, key: String, look: Look, actions: Actions?, pin: SmartSearch.Pin?, removed: (() -> Unit)?, dockSlot: Int = -1) {
         current?.dismissNow()
         val act = activityOf(anchor) ?: return
         val app = act.applicationContext
@@ -75,7 +81,7 @@ object AppMenu {
             Loader.main.post {
                 if (token != asking || activityOf(anchor) == null) return@post  // scrolled away or the screen closed meanwhile
                 current?.dismissNow()
-                current = Menu(act, anchor, key, look, actions, data, pin, removed).also { it.open() }
+                current = Menu(act, anchor, key, look, actions, data, pin, removed, dockSlot).also { it.open() }
             }
         }
     }
@@ -158,7 +164,7 @@ object AppMenu {
     }
 
     private class Menu(val act: Activity, val anchor: View, val key: String, val look: Look, val actions: Actions?, val data: Data,
-                       val pin: SmartSearch.Pin?, val removed: (() -> Unit)?) {
+                       val pin: SmartSearch.Pin?, val removed: (() -> Unit)?, val dockSlot: Int) {
         val pkg = AppKey.pkg(key)
         val still = reducedMotion(act)
         val decor = act.window.decorView as ViewGroup
@@ -321,7 +327,10 @@ object AppMenu {
             if (data.cuts.isNotEmpty()) divider()
 
             val a = actions
-            if (a != null && data.main) list.addView(row("Add to dock", null, R.drawable.ic_appmenu_dock, look.ink) { close { a.addToDock(pkg) } })
+            if (a != null && dockSlot >= 0) {
+                list.addView(row("Change app", null, R.drawable.ic_appmenu_dock, look.ink) { a.changeDock(dockSlot); close() })  // the picker opens at once, like App info
+                list.addView(row("Remove from dock", null, R.drawable.ic_appmenu_undock, look.ink) { close { a.removeFromDock(dockSlot) } })
+            } else if (a != null && data.main) list.addView(row("Add to dock", null, R.drawable.ic_appmenu_dock, look.ink) { close { a.addToDock(pkg) } })
             data.group?.let { g -> if (a != null) list.addView(groupRow(g, a)) }
             list.addView(row(if (data.hidden) "Show app" else "Hide app", null, if (data.hidden) R.drawable.ic_appmenu_show else R.drawable.ic_appmenu_hide, look.ink) {
                 close { HiddenApps.set(act, key, !data.hidden); a?.changed() }

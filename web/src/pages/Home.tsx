@@ -9,7 +9,8 @@ import { isPopped, needLine, popOut } from '../PanelWindow'
 import WaveField, { type DotShape } from '../WaveField'
 
 type Panel = { id: string; title: string; lines: string[]; details?: string } & PlainAsk
-type Ask = { id: string; tool: string; args: Record<string, unknown>; details?: string } & PlainAsk
+// grantable: Jharvis may always allow this exact command (Jhon, 3 Nov), so the card shows "Always allow"
+type Ask = { id: string; tool: string; args: Record<string, unknown>; details?: string; grantable?: boolean } & PlainAsk
 type Need = { kind: string; title: string; detail?: string; details?: string; action?: string; link?: string }
 /** The technical text, closed until he opens it. */
 const Fold = ({ text }: { text?: string }) => text ? (
@@ -99,9 +100,9 @@ export default function Home() {
     const t = setInterval(load, 2000)
     return () => { alive = false; clearInterval(t) }
   }, [])
-  async function decide(id: string, approve: boolean) {
+  async function decide(id: string, approve: boolean, always = false) {
     setDeciding(id)
-    await fetch(`/api/jharvis/approvals/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approve }) }).catch(() => {})
+    await fetch(`/api/jharvis/approvals/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(always ? { approve, always } : { approve }) }).catch(() => {})
     setAsks(a => a.filter(x => x.id !== id)); setDeciding(null)
   }
   function closePanel(id: string) {
@@ -161,6 +162,12 @@ export default function Home() {
                 <button type="button" disabled={deciding === a.id} onClick={() => decide(a.id, false)}
                   className="min-h-11 min-w-28 cursor-pointer rounded-full border border-white bg-white/60 px-6 text-sm text-ink hover:bg-white disabled:opacity-50">Deny</button>
               </div>
+              {a.grantable && (
+                <button type="button" disabled={deciding === a.id} onClick={() => decide(a.id, true, true)}
+                  className="mx-auto mt-2 block min-h-11 cursor-pointer rounded-full px-4 text-xs font-medium text-navy underline underline-offset-2 disabled:opacity-50">
+                  Always allow this exact command
+                </button>
+              )}
             </Glass>
           ))}
           {side === 'left' && needs.length > 0 && !needsClosed && !isPopped('needs') && (

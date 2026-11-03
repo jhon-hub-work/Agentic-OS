@@ -1,4 +1,4 @@
-import { Briefcase, CheckSquareOffset, List, X, CalendarDots, Waveform, ChatsCircle, Coins, DotsThreeOutline, Lightning, ListBullets, Plug, SquaresFour, Ticket, UsersFour, UsersThree, type Icon } from '@phosphor-icons/react'
+import { Briefcase, CheckSquareOffset, ClipboardText, List, X, CalendarDots, Waveform, ChatsCircle, Coins, DotsThreeOutline, Lightning, ListBullets, Plug, SquaresFour, Ticket, UsersFour, UsersThree, type Icon } from '@phosphor-icons/react'
 import { AnimatePresence, motion } from 'motion/react'
 import { useEffect, useState } from 'react'
 import Activity from './pages/Activity'
@@ -7,6 +7,7 @@ import Approvals from './pages/Approvals'
 import Chats from './pages/Chats'
 import Home from './pages/Home'
 import Jobs from './pages/Jobs'
+import JharvisLog from './pages/JharvisLog'
 import Schedules from './pages/Schedules'
 import Sessions from './pages/Sessions'
 import Cost, { GuardMini } from './pages/Cost'
@@ -33,6 +34,7 @@ const NAV: { id: string; label: string; icon: Icon }[] = [
   { id: 'agents', label: 'Agents & tools', icon: Plug },
   { id: 'overview', label: 'Overview', icon: SquaresFour },
   { id: 'cost', label: 'Billing', icon: Coins },
+  { id: 'jharvis-log', label: 'Jharvis log', icon: ClipboardText },
   { id: 'activity', label: 'Activity', icon: ListBullets },
 ]
 const PHONE_TABS = 4  // the rest sit under "More"
@@ -123,6 +125,7 @@ export default function App() {
             {page === 'cost' && <Cost />}
             {page === 'skills' && <Skills />}
             {page === 'activity' && <Activity />}
+            {page === 'jharvis-log' && <JharvisLog />}
           </motion.div>
         </AnimatePresence>
       </main>

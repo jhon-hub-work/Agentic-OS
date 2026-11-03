@@ -65,6 +65,7 @@ class Island(private val c: Context, private val onMute: (pkg: String, until: Lo
     private var added = false
     private var landscape = false
     private var fullscreen = false
+    private var locked = false  // the keyguard is up: no notification text over the lock screen
     private var rotation: DisplayManager.DisplayListener? = null
     private val collapse = Runnable { endAlert() }
     private val nextAlert = Runnable { queue.removeFirstOrNull()?.let(::present) }
@@ -154,8 +155,19 @@ class Island(private val c: Context, private val onMute: (pkg: String, until: Lo
         }
     }
 
+    /** The phone locked or unlocked. Locked: whatever alert shows goes, waiting ones are dropped, new ones never pop
+     *  (the system's own lock-screen notifications have them, under its privacy setting). Music and charging stay. */
+    fun locked(on: Boolean) {
+        if (on == locked) return
+        locked = on
+        if (!on) return
+        if (mode == Mode.MUSIC_OPEN) show(Mode.MUSIC)  // the open panel would sit under the lock card and catch its touches
+        queue.clear()
+        if (alert != null) endAlert()
+    }
+
     fun alert(a: Alert) {
-        if (!added || hidden() || alert?.key == a.key) return  // sideways or full screen: the system's own banner has it
+        if (!added || hidden() || locked || alert?.key == a.key) return  // sideways or full screen: the system's own banner has it
         if (alert != null || queue.isNotEmpty()) {
             queue.removeAll { it.key == a.key }
             queue.addLast(a)

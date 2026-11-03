@@ -360,6 +360,12 @@ export default function JharvisTalk({ energy, mood, speaking, onReply, sample, b
           {status === 'listening' && !wake && <span className="absolute inset-0 animate-ping rounded-full border-2 border-glacier/60" aria-hidden="true" />}
           {handsFree ? <Stop size={big ? 30 : 22} weight="fill" /> : wake || !IS_PHONE ? <Microphone size={big ? 36 : 24} /> : <MicrophoneSlash size={big ? 36 : 24} />}
         </button>
+        {/* Jhon, 3 Nov: stop the turn he's waiting on; Jharvis reads "stop" as his own words (brain.Steer) */}
+        {status === 'thinking' && (
+          <button onClick={() => send('stop')} aria-label="Stop Jharvis" title="Stop what Jharvis is doing" className={roundBtn}>
+            <Stop size={18} weight="fill" />
+          </button>
+        )}
         <button onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'Unmute Jharvis' : 'Mute Jharvis'} className={roundBtn}>
           {muted ? <SpeakerSlash size={18} /> : <SpeakerHigh size={18} />}
         </button>

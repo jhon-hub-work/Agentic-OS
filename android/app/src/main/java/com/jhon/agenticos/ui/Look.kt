@@ -3,6 +3,7 @@ package com.jhon.agenticos.ui
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
@@ -46,6 +47,12 @@ class Look(val c: Context) {
     val font: FontSpec = Themes.font(Appearance.prefs(c).getString(Appearance.FONT, null))
     val sans: Typeface = face(font, false)
     val medium: Typeface = face(font, true)
+    private val weights = android.util.SparseArray<Typeface>()
+    /** His font at any weight (clamped 300 light .. 900 black), for type that ranks by weight: one face per weight. */
+    fun faceAt(weight: Int): Typeface {
+        val w = weight.coerceIn(300, 900)
+        return weights[w] ?: Typeface.create(base(c, font), w, false).also { weights.put(w, it) }
+    }
     private val chromeStops = Themes.chrome(theme, accent)
     private val onChrome = Themes.onChrome(theme, accent)
     private val density = c.resources.displayMetrics.density
@@ -101,6 +108,13 @@ class Look(val c: Context) {
         t.setShadowLayer(px(2).toFloat(), 0f, 0f, if (dark) Color.argb(150, 255, 255, 255) else Color.argb(120, 0, 0, 0))
     }
 
+    /** legible() for text a view draws itself (Paint.drawText). */
+    fun legible(p: Paint) {
+        if (!onWall) return
+        val dark = Themes.luminance(p.color) < 0.179
+        p.setShadowLayer(px(2).toFloat(), 0f, 0f, if (dark) Color.argb(150, 255, 255, 255) else Color.argb(120, 0, 0, 0))
+    }
+
     /** The halo itself, whatever the wallpaper: Jharvis's overlay floats its words over any app. */
     fun halo(t: TextView) = t.setShadowLayer(px(6).toFloat(), 0f, 0f, withAlpha(ground, 230))
 
@@ -131,10 +145,13 @@ class Look(val c: Context) {
          *  family every Android ships. A bundled face (FontSpec.res) loads from res/font. */
         fun face(c: Context, f: FontSpec, bold: Boolean): Typeface {
             if (f.id == "system") return Typeface.create(if (bold) "sans-serif-medium" else "sans-serif", Typeface.NORMAL)
-            val base = if (f.res != 0) (try { c.resources.getFont(f.res) } catch (_: Exception) { null } ?: Typeface.DEFAULT)
-                else Typeface.create(f.family, Typeface.NORMAL)
-            return Typeface.create(base, if (bold) f.bold else f.body, false)
+            return Typeface.create(base(c, f), if (bold) f.bold else f.body, false)
         }
+
+        /** The font's regular face, which a weight is set on. */
+        fun base(c: Context, f: FontSpec): Typeface =
+            if (f.res != 0) (try { c.resources.getFont(f.res) } catch (_: Exception) { null } ?: Typeface.DEFAULT)
+            else Typeface.create(f.family, Typeface.NORMAL)
     }
 
     private fun face(f: FontSpec, bold: Boolean) = face(c, f, bold)

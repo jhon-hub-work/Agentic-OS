@@ -76,7 +76,7 @@ class GlanceView(c: Context, look: Look) : LinearLayout(c)   // date, weather, n
 // core/Shift.kt (builder C): see the contract in builder C's brief
 // ui/ModeChip.kt + core/Mode.kt (builder D)
 class ModeChip(c: Context, look: Look, onChange: () -> Unit) : LinearLayout(c)
-object Modes { fun current(now: Long = System.currentTimeMillis()): Mode; fun dockKey(slot: Int): String /* ... */ }
+object Modes { fun current(now: Long = System.currentTimeMillis()): Mode /* ... */ }
 enum class Mode { OFF, NIGHT, DRIVING }
 // ui/AppMenu.kt (builder G): press and hold an app -> its menu (shortcuts, Add to dock, Hide app, App info, Delete app)
 object AppMenu { interface Actions { fun addToDock(pkg: String); fun changed() }; fun show(anchor: View, pkg: String, look: Look, actions: Actions) }

@@ -71,8 +71,8 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
     private var onDigest: (() -> Unit)? = null
     private var digestOpen = false
 
-    // these two sit straight on the wallpaper: its inks, not the theme's
-    private val stale = look.text("", 13f, look.bare.warn).apply { visibility = GONE; setPadding(look.px(4), 0, look.px(4), look.px(10)); look.legible(this) }
+    // sits straight on the wallpaper: its inks, not the theme's. No "PC isn't answering" line here: the strip's
+    // "PC off since ..." chip already says it (Jhon, 3 Nov)
     private val empty = look.text("Nothing needs you", 15f, look.bare.ink3).apply {
         gravity = Gravity.CENTER; visibility = GONE; setPadding(0, look.px(14), 0, look.px(14))
         look.legible(this)
@@ -86,7 +86,6 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
     private val cascade = Cascade()
     private val column = LinearLayout(c).apply {
         orientation = LinearLayout.VERTICAL
-        addView(stale, LinearLayout.LayoutParams(-1, -2))
         addView(empty, LinearLayout.LayoutParams(-1, -2))
         addView(cascade, LinearLayout.LayoutParams(-1, -2))
         setOnClickListener { fan(false) }  // a tap beside the fanned list stacks it back
@@ -148,8 +147,6 @@ class PanelStack(c: Context, private val look: Look, private val host: Host) : F
     private fun render(home: JSONObject, approvals: JSONArray, panels: JSONArray, fresh: Boolean, asOf: Long, w: Set<String>) {
         waiting = w
         last = Last(home, approvals, panels, fresh, asOf)
-        stale.visibility = if (fresh) GONE else VISIBLE
-        if (!fresh) stale.text = "As of " + android.text.format.DateFormat.getTimeFormat(context).format(Date(asOf)) + ". The PC isn't answering."
 
         val models = ArrayList<Model>()
         val panelIds = HashSet<String>()

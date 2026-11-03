@@ -170,6 +170,7 @@ class HomeActivity : Activity(), PanelStack.Host {
         if (!getSharedPreferences("aos", MODE_PRIVATE).getBoolean("setup_done", false))
             startActivity(Intent(this, SetupActivity::class.java))
         showCached()
+        settleChange()
         fillDock()
         if (Layouts.current(this) != layoutId) useLayout(Layouts.current(this))  // changed in Settings: at once
         orbit.load()
@@ -192,7 +193,7 @@ class HomeActivity : Activity(), PanelStack.Host {
         away = true
         enter.snap(0f)
         closeOrbit(instant = true)
-        AppMenu.dismiss(); LayoutPicker.dismiss(); panels.collapse()
+        AppMenu.dismiss(); stopDockPick(); LayoutPicker.dismiss(); panels.collapse()  // stop after dismiss: it runs a pending "Add to dock"
     }
 
     override fun onDestroy() {
@@ -209,7 +210,7 @@ class HomeActivity : Activity(), PanelStack.Host {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (!::look.isInitialized) return
-        AppMenu.dismiss(); LayoutPicker.dismiss(); panels.collapse()
+        AppMenu.dismiss(); stopDockPick(); LayoutPicker.dismiss(); panels.collapse()  // stop after dismiss: it runs a pending "Add to dock"
         if (HomeMath.alreadyOnHome(hasWindowFocus(), intent.flags)) closeTop() else { closeOrbit(instant = true); page.snap(0f) }
     }
 
@@ -262,7 +263,7 @@ class HomeActivity : Activity(), PanelStack.Host {
         wave = JharvisOrb(this, look).apply {
             contentDescription = "Talk to Jharvis"
             isClickable = true; look.press(this, 0.95f)
-            setOnClickListener { pulse(); openOS("#/home", this) }
+            setOnClickListener { if ((layout.view as? MercuryView)?.tapOrb() != true) { pulse(); openOS("#/home", this) } }  // Mercury with a deck: its tray (TalkBack's double-tap lands here)
             setOnLongClickListener { openOS("#/home", this); true }
         }
         home.addView(wave, FrameLayout.LayoutParams(-1, -1))
@@ -307,17 +308,22 @@ class HomeActivity : Activity(), PanelStack.Host {
         // the panels fade right out under the open orbit, so their full-screen blur is dropped once they can't be seen
         if (!still) { val r = look.px(28) * oc; back.blur(r); panels.blur(if (oc >= 0.99f) 0f else r) }
         val ow = if (layout === orbit) 1f else which.value.coerceIn(0f, 1f)  // the orbit's share of what's open
-        val mid = if (layoutId == Layouts.SPHERE) 1f else ow  // the orb's pull to the centre: the sphere keeps it there
+        val mid = if (layoutId == Layouts.SPHERE || layoutId == Layouts.TYPE || layoutId == Layouts.SPLINE || layoutId == Layouts.MERCURY || layoutId == Layouts.HORIZON) 1f else ow  // the orb's pull to the centre: the sphere, the type, the spline, the mercury and the horizon keep it there
         val corner = (1 - mid) * oc  // 1 = the orb waits in the corner (0.3 of its size) while a layout is open
-        val k = 1 - CORNER_SHRINK * corner
+        // Typographic Matrix, Fluid Spline, Mercury Flow and Horizon Core: where he dragged the orb (and, the type framing a name, how
+        // small it is); gone as it shuts or search covers it
+        val tv = layout.view as? TypeView; val sv = layout.view as? SplineView; val mv = layout.view as? MercuryView; val hv = layout.view as? HorizonView
+        val tk = if (tv != null || sv != null || mv != null || hv != null) oc * (1 - ow) else 0f
+        val ox = tv?.orbX ?: sv?.orbX ?: mv?.orbX ?: hv?.orbX ?: 0f; val oy = tv?.orbY ?: sv?.orbY ?: mv?.orbY ?: hv?.orbY ?: 0f
+        val k = (1 - CORNER_SHRINK * corner) * (1 - tk * (1 - (tv?.orbK ?: 1f)))
         wave.compact = oc
         // only when it changes: at home the orb's own press squish owns its scale. zoom: hairlines keep their width
         if (k != waveK) { waveK = k; wave.scaleX = k; wave.scaleY = k; wave.zoom = k }
         val rc = cornerRadius()
         val gx = root.width / 2f + (1 - mid) * (HomeMath.cornerX(root.width.toFloat(), barRight.toFloat(), rc, look.px(16).toFloat()) - root.width / 2f)
         val gy = root.height / 2f + (1 - mid) * (HomeMath.cornerY(root.height.toFloat(), barTop.toFloat(), rc, look.px(2).toFloat()) - root.height / 2f)
-        wave.translationX = oc * (gx - (wave.left + wave.width / 2f))
-        wave.translationY = oc * (gy - (wave.top + wave.height / 2f))
+        wave.translationX = oc * (gx - (wave.left + wave.width / 2f)) + tk * ox
+        wave.translationY = oc * (gy - (wave.top + wave.height / 2f)) + tk * oy
         wave.translationZ = if (oc > 0.01f) 1f else 0f  // over the panels on its way to the centre
         topRow.alpha = 1 - corner  // the chips step out of the corner the orb takes
         orbit.progress = o * ow
@@ -387,6 +393,10 @@ class HomeActivity : Activity(), PanelStack.Host {
         Layouts.make(id, this, look, orbit, { icon, key -> launchApp(icon, key) }, { closeOrbit() }, { openOrbit(search = true) }).also {
             it.menuActions = menu
             (it.view as? SphereView)?.onOrb = { x, y -> orbAt(it.view, x, y).also { on -> if (on) wave.performClick() } }
+            (it.view as? TypeView)?.apply { onOrbTap = { wave.performClick() }; onOrbChanged = { depth() } }  // it moves the orb; Home draws it
+            (it.view as? SplineView)?.apply { onOrbTap = { wave.performClick() }; onOrbChanged = { depth() } }  // the thread's head: same
+            (it.view as? MercuryView)?.apply { onOrbTap = { wave.performClick() }; onOrbChanged = { depth() } }  // the dense drop: same (a deck's tap is its tray)
+            (it.view as? HorizonView)?.apply { onOrbTap = { wave.performClick() }; onOrbChanged = { depth() } }  // the vanishing point: same
             if (it !== orbit) { root.addView(it.view, root.indexOfChild(orbit), FrameLayout.LayoutParams(-1, -1)); root.requestApplyInsets() }
         }
 
@@ -420,7 +430,10 @@ class HomeActivity : Activity(), PanelStack.Host {
         else -> null
     }
 
-    private fun closeTop() { when (openSpring()) { orb -> closeOrbit(); page -> showPage(0f); else -> {} } }
+    private fun closeTop() {
+        if (dockPick != null) { stopDockPick(); return }  // Back cancels "Add to dock" first
+        when (openSpring()) { orb -> closeOrbit(); page -> showPage(0f); else -> {} }
+    }
 
     /** Predictive Back: the orbit or the widgets page eases a little way shut as the back swipe grows, closes when he
      *  lets go, and springs back if he changes his mind. */
@@ -490,6 +503,7 @@ class HomeActivity : Activity(), PanelStack.Host {
             if (mode == NONE && openSpring() == null && !under { (it.isClickable || it.isLongClickable) && (it !== wave || onOrbLens()) }) {
                 lastTap = 0L
                 performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                stopDockPick()
                 pickLayout()
             }
         }
@@ -502,6 +516,7 @@ class HomeActivity : Activity(), PanelStack.Host {
         override fun performClick(): Boolean { super.performClick(); return true }
 
         private fun tapped(e: MotionEvent) {
+            if (dockPick != null) { stopDockPick(); lastTap = 0L; return }  // a tap elsewhere cancels "Add to dock", and isn't half a double tap
             if (openSpring() != null) { lastTap = 0L; return }
             if (HomeMath.doubleTap(lastTap, lastTapX, lastTapY, e.downTime, e.x, e.y, ViewConfiguration.getDoubleTapTimeout().toLong(), tapSlop.toFloat())) {
                 lastTap = 0L; global("lock")
@@ -560,7 +575,7 @@ class HomeActivity : Activity(), PanelStack.Host {
                             SEARCH -> { tick(); openOrbit(search = true) }
                             SHADE -> global("shade")
                         }
-                        if (mode == ORBIT || mode == PAGE) { downX = e.x; downY = e.y; parent?.requestDisallowInterceptTouchEvent(true) }
+                        if (mode == ORBIT || mode == PAGE) { stopDockPick(); downX = e.x; downY = e.y; parent?.requestDisallowInterceptTouchEvent(true) }
                     }
                     when (mode) {
                         ORBIT -> {
@@ -641,7 +656,7 @@ class HomeActivity : Activity(), PanelStack.Host {
 
         /** The orb waiting in the corner while a layout is open: a thumb-sized circle around its lens. */
         private fun onCornerOrb(x: Float, y: Float): Boolean {
-            if (layout === orbit || layoutId == Layouts.SPHERE || orb.target < 1f || orb.value < 0.9f || which.target > 0f) return false
+            if (layout === orbit || layoutId == Layouts.SPHERE || layoutId == Layouts.TYPE || layoutId == Layouts.SPLINE || layoutId == Layouts.MERCURY || layoutId == Layouts.HORIZON || orb.target < 1f || orb.value < 0.9f || which.target > 0f) return false
             val r = max(cornerRadius() * 1.3f, look.px(24).toFloat())
             val dx = x - (wave.left + wave.width / 2f + wave.translationX); val dy = y - (wave.top + wave.height / 2f + wave.translationY)
             return dx * dx + dy * dy <= r * r
@@ -863,8 +878,13 @@ class HomeActivity : Activity(), PanelStack.Host {
                 val l = s.launch
                 if (l != null) LockedApps.launch(this, s.key, s.name) { LaunchCounts.bump(this, s.key); go(icon, l) } else pickFor(slot)
             }
-            // hold an app: its menu (shortcuts, hide, info, delete); hold an empty spot: pick an app for it
-            box.setOnLongClickListener { if (s.launch != null) AppMenu.show(icon, s.key, look, menu) else pickFor(slot); true }
+            // hold an app: its menu (change app, remove from dock, shortcuts, hide, info, delete); hold an empty spot: pick an
+            // app for it; in pick mode a hold places, like a tap
+            box.setOnLongClickListener {
+                dockPick?.let { pkg -> placeInDock(slot, pkg); return@setOnLongClickListener true }
+                if (s.launch != null) AppMenu.show(icon, s.key, look, menu, dockSlot = slot) else pickFor(slot)
+                true
+            }
             slots += s
             row.addView(box, LinearLayout.LayoutParams(0, -2, 1f))
         }
@@ -884,17 +904,31 @@ class HomeActivity : Activity(), PanelStack.Host {
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO  // the slot reads it out instead
     }
 
+    /** Each spot from its app and pick mode: an empty or hidden spot is gone (the others spread across the row), and
+     *  while an app is being placed every spot shows, lit, as "Here". */
+    private fun paintDock() {
+        val picking = dockPick != null
+        showBadges()
+        for (s in slots) {
+            s.box.visibility = if (HomeMath.dockShows(s.launch != null, picking)) View.VISIBLE else View.GONE
+            s.box.background = if (picking) look.round(look.withAlpha(look.glacier, 46), 18, look.glacier) else null
+            s.label.text = if (picking) "Here" else s.name ?: ""
+        }
+    }
+
     private fun showBadges() {
         for (s in slots) {
             val n = if (s.launch != null) badges[s.pkg] ?: 0 else 0
             s.badge.text = HomeMath.badgeText(n)
             s.badge.visibility = if (n > 0) View.VISIBLE else View.GONE
-            s.box.contentDescription = s.name?.let { HomeMath.slotSays(it, n) } ?: "Pick an app"
+            // here, not in paintDock: a badge arriving in pick mode repaints only this
+            s.box.contentDescription = if (dockPick != null) "Put it here" + (s.name?.let { ", in place of $it" } ?: "")
+                else s.name?.let { HomeMath.slotSays(it, n) } ?: "Pick an app"
         }
     }
 
-    /** Which app sits in each slot: the current mode's pick, else his usual pick, else a default. Package lookups are
-     *  IPC, so they run off the main thread. */
+    /** Which app sits in each slot: his pick ("" = he removed it; one dock for every mode), else a default. Package
+     *  lookups are IPC, so they run off the main thread. */
     private fun fillDock() {
         val gen = ++dockGen
         on(io) {
@@ -909,8 +943,8 @@ class HomeActivity : Activity(), PanelStack.Host {
             }
             val hidden = HiddenApps.all(this@HomeActivity)
             val got = (0 until 4).map { slot ->
-                val pkg = prefs.getString(Modes.dockKey(slot), null) ?: prefs.getString("dock$slot", null) ?: defaults[slot]
-                // a hidden app stays off the dock: its slot shows as empty ("Pick"). Hidden holds app keys, and an app
+                val pkg = prefs.getString("dock$slot", null) ?: defaults[slot]
+                // a hidden app stays off the dock: its spot goes, like a removed one. Hidden holds app keys, and an app
                 // with two launcher icons is keyed by its component, so the dock's package is matched through its key.
                 val key = if (pkg.isEmpty()) pkg else AppKey.forPackage(this@HomeActivity, pkg)
                 val launch = pkg.takeIf { it.isNotEmpty() && key !in hidden && it !in hidden }?.let { pm.getLaunchIntentForPackage(it) }
@@ -923,11 +957,10 @@ class HomeActivity : Activity(), PanelStack.Host {
                 got.forEachIndexed { k, a ->
                     val s = slots[k]
                     s.pkg = a.pkg; s.key = a.key; s.launch = a.launch; s.name = a.label
-                    s.label.text = a.label ?: "Pick"
                     if (a.icon != null) { s.icon.background = null; s.icon.setImageDrawable(a.icon) }
                     else { s.icon.setImageDrawable(null); s.icon.background = look.round(Color.TRANSPARENT, 16, look.ink3) }
                 }
-                showBadges()
+                paintDock()
             }
         }
     }
@@ -935,6 +968,8 @@ class HomeActivity : Activity(), PanelStack.Host {
     /** What the app menu's actions mean on Home. */
     private val menu = object : AppMenu.Actions {
         override fun addToDock(pkg: String) = startDockPick(pkg)
+        override fun changeDock(slot: Int) = pickFor(slot)
+        override fun removeFromDock(slot: Int) { saveDock(HomeMath.dockPlace(slots.map { it.pkg }, slot, "")); fillDock() }
         override fun changed() { MenuChange.at = SystemClock.uptimeMillis(); orbit.load(); if (layout !== orbit) layout.load(); fillDock(); modeChip.refresh() }
     }
 
@@ -944,12 +979,10 @@ class HomeActivity : Activity(), PanelStack.Host {
     private val endDockPick = Runnable { stopDockPick() }
 
     private fun startDockPick(pkg: String) {
-        closeOrbit()
+        closeOrbit(instant = true)  // at once: a spring still settling would take the first tap on "Here" as a grab
+        dockGen++                   // a fill already under way would paint over the "Here" spots
         dockPick = pkg
-        for (s in slots) {
-            s.box.background = look.round(look.withAlpha(look.glacier, 46), 18, look.glacier)
-            s.label.text = "Here"
-        }
+        paintDock()
         slots.firstOrNull()?.box?.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
         main.removeCallbacks(endDockPick); main.postDelayed(endDockPick, 8000)
     }
@@ -958,18 +991,38 @@ class HomeActivity : Activity(), PanelStack.Host {
         if (dockPick == null) return
         dockPick = null
         main.removeCallbacks(endDockPick)
-        for (s in slots) s.box.background = null
+        paintDock()
         fillDock()
     }
 
     private fun placeInDock(slot: Int, pkg: String) {
-        getSharedPreferences("aos", MODE_PRIVATE).edit().putString(Modes.dockKey(slot), pkg).apply()
+        saveDock(HomeMath.dockPlace(slots.map { it.pkg }, slot, pkg))
         slots[slot].box.performHapticFeedback(android.view.HapticFeedbackConstants.CONFIRM)
-        stopDockPick()
+        // not stopDockPick(): its paint would hide an empty spot before the fill brings it back, so the row jumps twice
+        dockPick = null; main.removeCallbacks(endDockPick); fillDock()
     }
 
-    private fun pickFor(slot: Int) = startActivity(Intent(this, DrawerActivity::class.java)
-        .putExtra(DrawerActivity.SLOT, slot).putExtra("key", Modes.dockKey(slot)))
+    /** Writes only the spots that changed ("" = removed), so a spot still on its default keeps following it. */
+    private fun saveDock(next: List<String>) {
+        val e = getSharedPreferences("aos", MODE_PRIVATE).edit()
+        next.forEachIndexed { k, p -> if (p != slots[k].pkg) e.putString("dock$k", p) }
+        e.apply()
+    }
+
+    private var changing = -1  // the spot the picker is choosing for, until Home is back
+
+    /** "Change app" (or an empty spot): the A to Z picker writes "dock$slot" itself. */
+    private fun pickFor(slot: Int) {
+        changing = slot
+        startActivity(Intent(this, DrawerActivity::class.java).putExtra(DrawerActivity.SLOT, slot))
+    }
+
+    /** Back from the picker: an app it put here that already sat in another spot moves, never shows twice. */
+    private fun settleChange() {
+        val slot = changing.also { changing = -1 }
+        if (slot < 0) return
+        getSharedPreferences("aos", MODE_PRIVATE).getString("dock$slot", null)?.let { saveDock(HomeMath.dockPlace(slots.map { s -> s.pkg }, slot, it)) }
+    }
 
     /** An app from the orbit or search, by app key (work apps and apps with two launcher activities too). */
     private fun launchApp(icon: View, key: String) {
@@ -1089,6 +1142,13 @@ object HomeMath {
     }
 
     fun badgeText(n: Int) = if (n > 99) "99+" else n.toString()
+
+    /** The dock after pkg goes into slot ("" removes what is there): an app already in another spot moves there,
+     *  so it never shows twice. */
+    fun dockPlace(dock: List<String>, slot: Int, pkg: String) = dock.mapIndexed { k, p -> if (k == slot) pkg else if (p == pkg) "" else p }
+
+    /** A dock spot shows only with an app in it, or while an app is being placed (then every spot lights as "Here"). */
+    fun dockShows(hasApp: Boolean, picking: Boolean) = hasApp || picking
 
     /** What TalkBack says for a dock app. */
     fun slotSays(label: String, n: Int) = when {

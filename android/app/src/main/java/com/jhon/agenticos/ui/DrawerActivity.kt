@@ -16,10 +16,10 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 
-/** All apps A to Z (every profile; hidden apps stay hidden), with search. Opened with SLOT (or KEY, a prefs key such
- *  as a mode's dock slot) it picks an app for the dock instead of launching it. */
+/** All apps A to Z (every profile; hidden apps stay hidden), with search. Opened with SLOT it
+ *  picks an app for that dock slot ("dock$slot") instead of launching it. */
 class DrawerActivity : Activity() {
-    companion object { const val SLOT = "slot"; const val KEY = "key" }
+    companion object { const val SLOT = "slot" }
 
     private lateinit var look: Look
     private lateinit var search: EditText
@@ -51,7 +51,7 @@ class DrawerActivity : Activity() {
         super.onCreate(state)
         look = Look(this)
         val slot = intent.getIntExtra(SLOT, -1)
-        val key = intent.getStringExtra(KEY) ?: if (slot >= 0) "dock$slot" else null
+        val key = if (slot >= 0) "dock$slot" else null
         picking = key != null
         // browsing all apps: the list first, the keyboard only when he taps search
         if (key == null) window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)

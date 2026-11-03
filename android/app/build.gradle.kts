@@ -20,7 +20,7 @@ android {
         applicationId = "com.jhon.agenticos"
         minSdk = 33 // OnBackInvokedDispatcher
         targetSdk = 36
-        versionCode = 2026110101  // yyyyMMddNN: always grows, readable at a glance
+        versionCode = 2026110305  // yyyyMMddNN: always grows, readable at a glance
         versionName = "1.1.0"
     }
 

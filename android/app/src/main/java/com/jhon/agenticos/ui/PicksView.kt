@@ -401,7 +401,7 @@ class PicksView(c: Context, private val look: Look, private val onLaunch: (icon:
             // the dock seeds the picks before there is any launch history, as it seeds the orbit's inner ring
             val prefs = app.getSharedPreferences("aos", Context.MODE_PRIVATE)
             val mode = try { Modes.current() } catch (_: Exception) { Mode.OFF }
-            val dock = (0 until 4).mapNotNull { prefs.getString(Modes.dockKey(it, mode), null) ?: prefs.getString("dock$it", null) }  // the mode's dock first, as fillDock
+            val dock = (0 until 4).mapNotNull { prefs.getString("dock$it", null) }  // one dock for every mode, as fillDock
                 .map { if (it in byKey) it else AppKey.forPackage(app, it) }.filter { it in byKey }.distinct()
             val top = LaunchCounts.ranked(app, dock + shown.map { it.key }.filter { it !in dock }).take(PICKS).mapNotNull { byKey[it] }
             for (e in top) Icons.load(app, e)  // the picks' icons are ready before they pop in

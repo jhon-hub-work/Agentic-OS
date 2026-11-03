@@ -93,9 +93,6 @@ object Modes {
     /** Off -> Night shift -> Driving -> Off (the Quick Settings tile). */
     fun next(m: Mode): Mode = Mode.values()[(m.ordinal + 1) % Mode.values().size]
 
-    /** Dock apps per mode; an empty slot falls back to the normal dock ("dock$slot"). */
-    fun dockKey(slot: Int, m: Mode = current()): String = if (m == Mode.OFF) "dock$slot" else "dock_${m.name.lowercase()}_$slot"
-
     /** Night shift or Sleep (Quiet): Jharvis doesn't speak or pop chats, and the island skips them. */
     fun quietChats(now: Long = System.currentTimeMillis()) = current(now) == Mode.NIGHT || Quiet.on()
 

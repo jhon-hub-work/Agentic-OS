@@ -3,10 +3,31 @@ package com.jhon.agenticos.ui
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HomeMathTest {
+    // Jhon, 3 Nov: "I can't remove apps from the dock or add more, or change it"
+    @Test fun dockPlacesMovesAndRemoves() {
+        val d = listOf("dial", "chat", "web", "cam")
+        assertEquals(listOf("dial", "chat", "maps", "cam"), HomeMath.dockPlace(d, 2, "maps"))  // a new app into a spot
+        assertEquals(listOf("dial", "", "chat", "cam"), HomeMath.dockPlace(d, 2, "chat"))     // already docked: it moves, never twice
+        assertEquals(d, HomeMath.dockPlace(d, 1, "chat"))                                      // its own spot: nothing changes
+        assertEquals(listOf("dial", "", "web", "cam"), HomeMath.dockPlace(d, 1, ""))          // removed: "" (not a missing key, which is a default)
+        val none = (0 until 4).fold(d) { now, k -> HomeMath.dockPlace(now, k, "") }
+        assertEquals(listOf("", "", "", ""), none)                                             // all four gone: only Apps is left
+        assertEquals(listOf("", "maps", "", ""), HomeMath.dockPlace(none, 1, "maps"))         // and an empty spot fills again
+    }
+
+    @Test fun emptyDockSpotsShowOnlyWhilePlacing() {
+        assertTrue(HomeMath.dockShows(hasApp = true, picking = false))
+        assertFalse(HomeMath.dockShows(hasApp = false, picking = false))  // removed or hidden: the spot is gone, the rest spread out
+        assertTrue(HomeMath.dockShows(hasApp = false, picking = true))    // Add to dock: empty spots light up as "Here"
+        assertTrue(HomeMath.dockShows(hasApp = true, picking = true))     // a full spot can be replaced too
+    }
+
     // Jhon, 2 Nov: pull down for search on Home, press Back, and Orbit showed although his layout is Honeycomb
     @Test fun backFromSearchGoesWhereHeCameFrom() {
         assertEquals(HomeMath.BACK_TO_RINGS, HomeMath.searchBack(layoutIsOrbit = true, fromLayout = false))  // Orbit: its rings

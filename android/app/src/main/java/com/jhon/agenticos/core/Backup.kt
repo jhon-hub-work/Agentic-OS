@@ -9,7 +9,7 @@ import java.io.InputStream
 import java.io.OutputStream
 
 /** His whole launcher setup as one versioned JSON file, so a reinstall, a key change or a new phone loses nothing.
- *  Carries the UI "aos" prefs (dock, per-mode docks, hidden and locked apps, pins, appearance, glance), the launch
+ *  Carries the UI "aos" prefs (dock, "" = a removed spot; hidden and locked apps, pins, appearance, glance), the launch
  *  history, the widget providers in order (ids belong to this install, so they are rebound on import) and the
  *  Link.dir mode and shift files. Never the pairing cookie (it lives in a file this never reads) or the photo bytes.
  *  The pure parts (encode, decode) run in plain unit tests; settings does the SAF streams and the widget rebinding. */
@@ -20,8 +20,9 @@ object Backup {
     val FILES = listOf("mode.json", "shift.json")  // the only Link.dir files read or written, by exact name
 
     /** Keys that belong to this install, not to him: Android's widget ids, grants he must give again after a reinstall
-     *  (setup ticks, asked-once flags), the appearance counter (import bumps it instead) and import's own to-do list. */
-    fun portable(key: String) = key !in LOCAL && !key.startsWith("setup_") && !key.endsWith("_asked")
+     *  (setup ticks, asked-once flags), the appearance counter (import bumps it instead) and import's own to-do list.
+     *  Old per-mode docks ("dock_night_0") never travel either: one dock serves every mode now ("dock0".."dock3"). */
+    fun portable(key: String) = key !in LOCAL && !key.startsWith("setup_") && !key.endsWith("_asked") && !key.startsWith("dock_")
     private val LOCAL = setOf("widgets", "ap_v", "restore_widgets", "backup_last", "mode_tile_added")
 
     class Setup(val prefs: Map<String, Any>, val launches: Map<String, Any>, val widgets: List<String>,

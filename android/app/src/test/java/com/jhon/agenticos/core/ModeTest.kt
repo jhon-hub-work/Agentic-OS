@@ -85,13 +85,6 @@ class ModeTest {
         assertEquals(ModeState(null, 0L, true), ModeState.parse("{\"manual\":null,\"until\":0,\"auto\":true}"))
     }
 
-    @Test fun dockKeys() {
-        assertEquals("dock2", Modes.dockKey(2, Mode.OFF))
-        assertEquals("dock_night_0", Modes.dockKey(0, Mode.NIGHT))
-        assertEquals("dock_driving_3", Modes.dockKey(3, Mode.DRIVING))
-        assertEquals("dock1", Modes.dockKey(1))  // no file: Off
-    }
-
     @Test fun cycleForTheTile() {
         assertEquals(Mode.NIGHT, Modes.next(Mode.OFF))
         assertEquals(Mode.DRIVING, Modes.next(Mode.NIGHT))

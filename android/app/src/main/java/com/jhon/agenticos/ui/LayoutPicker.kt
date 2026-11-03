@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.os.Build
 import android.view.Gravity
@@ -18,13 +19,14 @@ import android.window.BackEvent
 import android.window.OnBackAnimationCallback
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
+import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** "App layout": the five ways to show all apps, each with a small drawn preview, on a glass sheet that rises from
+/** "App layout": every way to show all apps, each with a small drawn preview, on a glass sheet that rises from
  *  the bottom of any screen (Home's long press on empty frost, Settings). A pick applies at once (onPick), then the
  *  sheet leaves the way it came. Back, or a tap outside, closes it; predictive Back shrinks it as the swipe grows. */
 object LayoutPicker {
@@ -161,6 +163,13 @@ object LayoutPicker {
     }
 }
 
+// Typographic Matrix's tile: each line's bar widths (of the tile's width) and thickness (of its size)
+private val TYPE_BARS = arrayOf(floatArrayOf(0.34f, 0.40f), floatArrayOf(0.26f, 0.2f, 0.28f), floatArrayOf(0.16f, 0.2f, 0.12f),
+    floatArrayOf(0.12f, 0.16f, 0.1f, 0.14f, 0.12f), floatArrayOf(0.1f, 0.08f, 0.12f, 0.09f, 0.11f, 0.1f))
+private val TYPE_THICK = floatArrayOf(0.11f, 0.08f, 0.06f, 0.045f, 0.035f)
+// Mercury Flow's tile: the drops scattered round the orb, as fractions of the tile (x, y)
+private val MERCURY_DROPS = floatArrayOf(0.14f, 0.24f, 0.34f, 0.78f, 0.6f, 0.14f, 0.84f, 0.36f, 0.76f, 0.8f, 0.1f, 0.66f, 0.92f, 0.62f, 0.3f, 0.12f)
+
 /** A small drawing of each layout, in the theme's ink and accent. Everything is worked out from the size in onDraw
  *  with plain floats: nothing is allocated while drawing. */
 private class Preview(c: Context, look: Look, private val id: String) : View(c) {
@@ -171,7 +180,18 @@ private class Preview(c: Context, look: Look, private val id: String) : View(c) 
         color = look.inkA(46); style = Paint.Style.STROKE; strokeWidth = c.resources.displayMetrics.density
     }
     private val lens = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xE0162334.toInt() }  // the orb's dark lens
+    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {  // Fluid Spline's thread: a faint wide glow under a bright line
+        color = look.withAlpha(look.glacier, 50); style = Paint.Style.STROKE; strokeWidth = c.resources.displayMetrics.density * 5; strokeCap = Paint.Cap.ROUND
+    }
+    private val thread = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = look.glacier; style = Paint.Style.STROKE; strokeWidth = c.resources.displayMetrics.density * 1.5f; strokeCap = Paint.Cap.ROUND
+    }
+    // Horizon Core's tunnel: neon edges (a faint wide glow under a thin bright line) on a dark wash
+    private val neon = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = c.resources.displayMetrics.density }
+    private val neonGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = c.resources.displayMetrics.density * 3.5f }
+    private val wash = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xF00A0D18.toInt() }
     private val r = RectF()
+    private val wave = Path()  // Fluid Spline's thread as one path: separate round-capped segments double the glow at every joint
 
     init { importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO }  // the tile says what it shows
 
@@ -233,6 +253,66 @@ private class Preview(c: Context, look: Look, private val id: String) : View(c) 
                         p.alpha = was
                     }
                 }
+            }
+            Layouts.TYPE -> {  // lines of names, heavy and thin, one framed in a pill with the orb as its end dot
+                val left = w * 0.08f; val span = w * 0.84f; var y = h * 0.08f
+                for (row in TYPE_BARS.indices) {
+                    val ws = TYPE_BARS[row]
+                    val t = m * TYPE_THICK[row]; val gap = (span - ws.sum() * w) / (ws.size - 1)  // justified, as the drawer sets them
+                    var x = left
+                    for (k in ws.indices) {
+                        val bw = ws[k]
+                        r.set(x, y, x + bw * w, y + t)
+                        val framed = row == 2 && k == 1
+                        canvas.drawRoundRect(r, t / 2, t / 2, if (framed) hot else card.takeIf { row > 1 } ?: dot)
+                        if (framed) {
+                            val pad = t * 0.9f
+                            r.set(x - pad, y - pad, x + bw * w + pad * 3.4f, y + t + pad); canvas.drawRoundRect(r, r.height() / 2, r.height() / 2, line)
+                            canvas.drawCircle(r.right - pad * 1.3f, y + t / 2, t * 0.55f, lens)
+                        }
+                        x += bw * w + gap
+                    }
+                    y += t + h * 0.1f
+                }
+            }
+            Layouts.SPLINE -> {  // one winding thread from the orb, beads along it, the most used nearest
+                val x0 = w * 0.16f; val span = w * 0.76f; val amp = h * 0.3f
+                fun yAt(t: Float) = cy + amp * sin(t * 2.4f * PI.toFloat() + 0.6f) * (0.35f + 0.65f * t)  // the swing opens out away from the orb
+                wave.rewind(); wave.moveTo(x0, yAt(0f))
+                for (k in 1..32) { val t = k / 32f; wave.lineTo(x0 + span * t, yAt(t)) }
+                canvas.drawPath(wave, glow); canvas.drawPath(wave, thread)
+                for (k in 0 until 6) {
+                    val t = 0.14f + k * 0.17f
+                    canvas.drawCircle(x0 + span * t, yAt(t), m * 0.07f, if (k == 0) hot else dot)
+                }
+                canvas.drawCircle(x0, yAt(0f), m * 0.13f, lens)
+            }
+            Layouts.MERCURY -> {  // drops scattered round the orb, one melting into it through a neck
+                val d = m * 0.075f
+                for (k in 0 until MERCURY_DROPS.size / 2) canvas.drawCircle(MERCURY_DROPS[k * 2] * w, MERCURY_DROPS[k * 2 + 1] * h, d, dot)
+                canvas.drawCircle(cx + m * 0.25f, cy - m * 0.05f, d, hot)
+                canvas.drawCircle(cx + m * 0.17f, cy - m * 0.03f, d * 0.6f, hot)
+                canvas.drawCircle(cx, cy, m * 0.13f, lens)
+            }
+            Layouts.HORIZON -> {  // a neon tunnel: tiles on a floor and a ceiling running to the orb, smaller and fainter with distance
+                r.set(0f, 0f, w, h); canvas.drawRoundRect(r, m * 0.1f, m * 0.1f, wash)  // dark-backed, as the drawer is
+                val lane = w * 0.22f
+                neon.color = HorizonMath.NEON_CYAN; neon.alpha = 140
+                for (k in -2..5) { val x = cx + (k - 1.5f) * lane * 1.6f; canvas.drawLine(x, h, cx, cy, neon); canvas.drawLine(x, 0f, cx, cy, neon) }
+                neon.color = HorizonMath.NEON_YELLOW; canvas.drawLine(0f, cy, w, cy, neon)
+                for (d in 2 downTo 0) for (up in 0..1) {  // back to front, the floor row then the ceiling row at each depth
+                    val s = 3f / (3f + d * 1.6f); val t = m * 0.22f * s; val fade = 1f - d * 0.25f
+                    val y = cy + ((if (up == 1) h * 0.03f else h * 0.97f) - cy) * s
+                    for (col in 0 until 3) {
+                        val x = cx + (col - 1) * lane * 1.3f * s
+                        if (up == 1) r.set(x - t / 2, y, x + t / 2, y + t) else r.set(x - t / 2, y - t, x + t / 2, y)
+                        canvas.drawRoundRect(r, t * 0.26f, t * 0.26f, wash)
+                        val c = HorizonMath.NEON[(d * 2 + up + col) % 3]
+                        neonGlow.color = c; neonGlow.alpha = (60 * fade).toInt(); canvas.drawRoundRect(r, t * 0.26f, t * 0.26f, neonGlow)
+                        neon.color = c; neon.alpha = (255 * fade).toInt(); canvas.drawRoundRect(r, t * 0.26f, t * 0.26f, neon)
+                    }
+                }
+                canvas.drawCircle(cx, cy, m * 0.13f, lens)
             }
             else -> {  // orbit: rings around the orb
                 for (ring in 0 until 2) {

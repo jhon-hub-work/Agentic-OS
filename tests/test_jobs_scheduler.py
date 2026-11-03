@@ -81,5 +81,103 @@ class SchedulerReloadTests(unittest.TestCase):
         self.assertEqual([j.id for j in s._scheduler.get_jobs()], ["good"])
 
 
+class DailySearchWaitTests(unittest.TestCase):
+    """TKT-0022: the scheduled daily search waits for a running invite check instead of skipping and saying 'completed'."""
+    DAILY = {"id": "daily-test", "name": "Daily Test", "kind": "jobs"}
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from harness import Harness  # paths only, no server start: nothing writes to real data/
+        cls.h = Harness()
+        import server
+        cls.s = server
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.h.stop()
+
+    def setUp(self):
+        import threading
+        self.events, self.active, self.max_active = [], 0, 0
+        self.count_lock = threading.Lock()
+        self.release = {True: threading.Event(), False: threading.Event()}  # keyed by invites_only
+        self.started = {True: threading.Event(), False: threading.Event()}
+        self.fail = False
+
+    def fake_run(self, run_agent, log=print, after=None, invites_only=False):
+        with self.count_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        self.events.append(("start", "invites" if invites_only else "daily"))
+        self.started[invites_only].set()
+        self.release[invites_only].wait(5)
+        with self.count_lock:
+            self.active -= 1
+        self.events.append(("end", "invites" if invites_only else "daily"))
+        if self.fail and not invites_only:
+            raise RuntimeError("search broke")
+        return {"drafted": 0, "auto_sent": 0, "needs_you": 0}
+
+    def patched(self):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(pipeline, "run", self.fake_run))
+        stack.enter_context(mock.patch.object(sched, "emit_event", lambda e: self.events.append(("done", e["status"]))))
+        stack.enter_context(mock.patch.object(self.s, "append_audit", lambda e: None))
+        stack.enter_context(mock.patch.object(self.s, "run_followups", lambda: 0))
+        stack.enter_context(mock.patch.dict(people.PEOPLE, clear=True))
+        return stack
+
+    def thread(self, target, *args):
+        import threading
+        t = threading.Thread(target=target, args=args, daemon=True)
+        t.start()
+        return t
+
+    def test_daily_waits_for_invite_check(self):
+        with self.patched():
+            invites = self.thread(self.s.run_upwork_invites)
+            self.assertTrue(self.started[True].wait(5))
+            daily = self.thread(self.s.run_scheduled, self.DAILY, "cron")
+            daily.join(0.5)
+            self.assertTrue(daily.is_alive())                     # waiting, not skipped
+            self.assertEqual(self.events, [("start", "invites")])  # no search and no completion yet
+            self.release[False].set()
+            self.release[True].set()
+            invites.join(5)
+            daily.join(5)
+        self.assertEqual(self.events, [("start", "invites"), ("end", "invites"),
+                                       ("start", "daily"), ("end", "daily"), ("done", "completed")])
+        self.assertEqual(self.max_active, 1)
+        self.assertFalse(self.s._jobs_lock.locked())
+
+    def test_invite_check_during_daily_search(self):
+        with self.patched():
+            daily = self.thread(self.s.run_scheduled, self.DAILY, "cron")
+            self.assertTrue(self.started[False].wait(5))
+            self.assertEqual(self.s.run_upwork_invites(), {"skipped": "a job run is already going"})
+            self.release[False].set()
+            daily.join(5)
+        self.assertEqual(self.events, [("start", "daily"), ("end", "daily"), ("done", "completed")])
+        self.assertEqual(self.max_active, 1)
+        self.assertFalse(self.s._jobs_lock.locked())
+
+    def test_ordinary_call_still_skips_when_busy(self):
+        self.s._jobs_lock.acquire()
+        try:
+            self.assertEqual(self.s.run_job_pipeline(), {"skipped": "a job run is already going"})
+        finally:
+            self.s._jobs_lock.release()
+
+    def test_search_error_records_failure_and_frees_lock(self):
+        self.fail = True
+        self.release[False].set()
+        with self.patched():
+            self.s.run_scheduled(self.DAILY, "cron")
+        self.assertEqual(self.events, [("start", "daily"), ("end", "daily"), ("done", "failed")])
+        self.assertFalse(self.s._jobs_lock.locked())
+
+
 if __name__ == "__main__":
     unittest.main()
