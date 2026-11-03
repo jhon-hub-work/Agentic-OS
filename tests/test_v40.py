@@ -1233,6 +1233,33 @@ class UpworkInviteTests(unittest.TestCase):
         self.assertEqual((stats["drafted"], j["status"], j["invite"]), (1, "drafted", True))
         self.assertEqual(pipeline.platform(j["url"]), "Upwork")
 
+    def test_invite_checks_keep_their_own_run_list(self):
+        """2 Nov: 48 invite checks a day pushed the daily search off "runs", so Jharvis summed up a 0-found invite check."""
+        from jobs import pipeline
+        tmp = Path(tempfile.mkdtemp())
+        daily = {"started": "2026-11-03T07:00:00+00:00", "fetched": 109, "drafted": 6, "errors": []}
+        pipeline.save(tmp / "board.json", {"jobs": [], "runs": [daily]})
+        with mock.patch.object(pipeline, "BOARD", tmp / "board.json"), mock.patch.object(pipeline, "SEEN", tmp / "seen.json"), \
+             mock.patch.object(pipeline, "upwork_offers", return_value=[]):
+            stats = pipeline.run(lambda a, p: "", log=lambda m: None, invites_only=True)
+        board = pipeline.load(tmp / "board.json", {})
+        self.assertEqual(board["runs"], [daily])
+        self.assertEqual(board["invite_runs"][0]["started"], stats["started"])
+        self.assertEqual(board["invite_runs"][0]["finished"], stats["finished"])
+
+    def test_a_failed_invite_check_is_one_problem_a_day_and_not_the_job_search(self):
+        from jobs import pipeline
+        from scheduler import scheduler
+        tmp = Path(tempfile.mkdtemp())
+        daily = {"started": "2026-11-03T07:00:00+00:00", "fetched": 109, "errors": []}
+        inv = {"started": "2026-11-03T15:00:00+00:00", "fetched": 0, "errors": ["source Upwork invites failed: login"]}
+        pipeline.save(tmp / "board.json", {"jobs": [], "runs": [daily], "invite_runs": [inv]})
+        with mock.patch.object(pipeline, "BOARD", tmp / "board.json"), mock.patch.object(scheduler, "get_history", return_value=[]), \
+             mock.patch.object(server, "check_agent", return_value={"status": "online"}):
+            inbox = server.jharvis_inbox(touch=False)
+        self.assertEqual(inbox["last_run"], daily)
+        self.assertEqual([p["id"] for p in inbox["problems"]], ["invite-2026-11-03"])
+
 
 class CrewBriefTests(unittest.TestCase):
     def test_next_brief_sets_topic_and_image_once(self):

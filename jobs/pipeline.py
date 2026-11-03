@@ -239,6 +239,7 @@ def run(run_agent, log=print, after=None, invites_only=False) -> dict:
     board = load(BOARD, {"jobs": [], "runs": []})
     seen = load_seen(SEEN)
     stats = {"started": now(), "fetched": 0, "new": 0, "kept": 0, "scored": 0, "drafted": 0, "needs_you": 0, "errors": []}
+    key = "invite_runs" if invites_only else "runs"  # ~48 invite checks a day would push the daily search off the 50-run list
 
     note = lambda m: log(m) or (stats["errors"].append(m) if "failed" in m else None)
     offers = upwork_offers(log=note) if invites_only else upwork_offers(log=note) + hoot_offers(log=note) + sources.fetch_all(log=note) + indeed_alert_offers(seen, log=note)  # applyable ones first
@@ -306,14 +307,14 @@ def run(run_agent, log=print, after=None, invites_only=False) -> dict:
                 j.update(drafted_queue[j["id"]])
         all_jobs = new_items + board["jobs"]
         board["jobs"] = all_jobs[:300]
-        board["runs"] = ([stats] + board["runs"])[:50]
+        board[key] = ([stats] + board.get(key, []))[:50]
         save(BOARD, board)
     save_seen(SEEN, seen, all_jobs)
     stats["auto_sent"] = after() if after else 0
     stats["finished"] = now()
     with BOARD_LOCK:
         board = load(BOARD, {"jobs": [], "runs": []})
-        board["runs"][0].update(auto_sent=stats["auto_sent"], finished=stats["finished"])
+        board[key][0].update(auto_sent=stats["auto_sent"], finished=stats["finished"])
         save(BOARD, board)
     return stats
 

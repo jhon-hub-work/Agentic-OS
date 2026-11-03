@@ -512,7 +512,8 @@ _learnings_locks: dict = {}
 
 # TKT-0019: heartbeat's six checks, each judged by the name cell of a table row or JSON entry
 HEARTBEAT_CHECKS = {"CLI availability": r"claude|opencode|\bagy\b|agents?|\bcli\b", "Hermes gateway": r"hermes|gateway|8642",
-                    "C: disk": r"(?-i:\bC\b)", "D: disk": r"(?-i:\bD\b)", "memory": r"memory|\bram\b", "recent audit errors": r"audit"}
+                    # the 2 Nov JSON named them disk_c_under_90 / disk_d_under_90
+                    "C: disk": r"(?-i:\bC\b)|(?:disk|drive)[ _-]?c(?![a-z0-9])", "D: disk": r"(?-i:\bD\b)|(?:disk|drive)[ _-]?d(?![a-z0-9])", "memory": r"memory|\bram\b", "recent audit errors": r"audit|recent[ _-]?errors?"}  # 3 Nov: "Recent errors (limit 5)"
 CHECK_RESULT_RE = re.compile(r"\b(pass(ed|es)?|fail(ed|s|ing)?|ok|warn(ing)?|critical|healthy|degraded|down|borderline)\b|[✅❌⚠]", re.I)
 
 def _report_rows(text: str) -> list:
@@ -1750,13 +1751,21 @@ def jharvis_inbox(touch: bool = True):
                              "title": f"Your {a} helper isn't working", "detail": "It may need installing again. Open the OS to check."})
     for e in get_history(200):
         out = str(e.get("output", ""))
-        if e.get("type") == "job_done" and (re.match(r"(Failed|⏱|⚠|opencode failed)", out) or e.get("status") in ("failed", "unverified")):
-            problems.append({"id": f"job-{e.get('name')}-{str(e.get('timestamp', ''))[:10]}", "text": f"Schedule '{e.get('name')}' failed: {out[:200]}",
+        if e.get("type") == "job_done" and e.get("status") == "unverified":  # it ran; its report just missed a check
+            problems.append({"id": f"job-{e.get('name')}-{str(e.get('timestamp', ''))[:10]}",
+                             "text": f"Schedule '{e.get('name')}' ran, but its report couldn't be checked: {e.get('reason') or out[:200]}",
+                             "title": f"The \"{e.get('name')}\" report was incomplete", "detail": "Open the activity log to see what was missing."})
+        elif e.get("type") == "job_done" and (re.match(r"(Failed|⏱|⚠|opencode failed)", out) or e.get("status") == "failed"):
+            problems.append({"id": f"job-{e.get('name')}-{str(e.get('timestamp', ''))[:10]}", "text": f"Schedule '{e.get('name')}' failed: {e.get('reason') or out[:200]}",
                              "title": f"The scheduled job \"{e.get('name')}\" didn't finish", "detail": "Open the activity log to see what went wrong."})
-    last = board["runs"][0] if board["runs"] else None
+    last = board["runs"][0] if board["runs"] else None  # daily searches only: invite checks live in board["invite_runs"]
     if last and last.get("errors") and not last.get("fetched"):  # one feed being rate-limited is normal
         problems.append({"id": f"run-{last['started']}", "text": "Job run problems: " + "; ".join(last["errors"])[:400],
                          "title": "The job search hit problems on its last run", "detail": "No new jobs came in. Open the OS to check."})
+    inv = (board.get("invite_runs") or [None])[0]
+    if inv and inv.get("errors") and not inv.get("fetched"):  # one id a day, not one per half-hourly check
+        problems.append({"id": f"invite-{inv['started'][:10]}", "text": "Upwork invite check problems: " + "; ".join(inv["errors"])[:400],
+                         "title": "The Upwork invite check couldn't read your email", "detail": "Open the OS to check."})
     return {
         "applied": [j for j in board["jobs"] if j["status"] in ("applied", "handoff", "closed") and j.get("applied_at")],
         "drafts": [j for j in board["jobs"] if j["status"] == "drafted"],

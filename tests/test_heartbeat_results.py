@@ -64,6 +64,13 @@ Memory           PASS   74% used
 Audit            PASS   3 real error lines in the last 200
 ```
 """
+# the 2 Nov 06:01 format: a list of named checks, drives as disk_c_under_90 (was misread as "no result for C:/D:")
+JSON_LIST = "```json\n" + json.dumps({"run": "heartbeat", "verdict": "degraded", "checks": [
+    {"check": "agents_present", "pass": True}, {"check": "hermes_gateway", "pass": True},
+    {"check": "disk_c_under_90", "pass": False}, {"check": "disk_d_under_90", "pass": False},
+    {"check": "memory_under_80", "pass": False}, {"check": "audit_recent_errors", "pass": True}]}) + "\n```"
+# the 3 Nov 15:01 format: the audit row named "Recent errors"
+RECENT_ERRORS = HEALTHY.replace("| Audit log, last 200 lines | 0 | under 5 | pass |", "| Recent errors (limit 5) | 7 | under 5 | fail |")
 LIMIT = "You've hit your session limit · resets 6pm (America/Los_Angeles)"
 OFF_TOPIC = ("Jhon, that last call was a mistake. There was no code review, so there was nothing to report. "
              "The heartbeat result above stands.")
@@ -119,7 +126,7 @@ class HeartbeatResultTests(unittest.TestCase):
         self.assert_not_completed((0, claude_json(OFF_TOPIC), ""), "unverified")
 
     def test_complete_reports_pass_healthy_or_degraded(self):
-        for report in (HEALTHY, DEGRADED, JSON_REPORT, JSON_TOP, FENCED):
+        for report in (HEALTHY, DEGRADED, JSON_REPORT, JSON_TOP, FENCED, JSON_LIST, RECENT_ERRORS):
             api, done, job_run, skill_run = self.run_heartbeat((0, claude_json(report), ""))
             self.assertEqual([api["status"], done["status"], job_run["status"], skill_run["status"]], ["completed"] * 4, report[:40])
             self.assertEqual(api["output"], report.strip())
